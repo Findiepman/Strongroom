@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>strongroom — settings</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<div id="app">
+  <div class="panel">
+    <h2>Storage</h2>
+    <div class="gauge" style="max-width:420px">
+      <div class="gauge-nums" style="font-size:13px">
+        <span id="usage-label">…</span>
+        <span id="usage-pct"></span>
+      </div>
+      <div class="gauge-track" style="height:6px">
+        <div class="gauge-fill" id="usage-fill"></div>
+      </div>
+    </div>
+    <p class="sub" style="margin-top:12px">
+      Usage counts everything in your web storage folder. Ask an admin if you
+      need a bigger quota.
+    </p>
+  </div>
+
+  <div class="panel" style="max-width:480px">
+    <h2>Change password</h2>
+    <form id="password-form">
+      <div class="field">
+        <label for="pw-current">Current password</label>
+        <input type="password" id="pw-current" autocomplete="current-password" required>
+      </div>
+      <div class="field">
+        <label for="pw-next">New password</label>
+        <input type="password" id="pw-next" autocomplete="new-password" required minlength="10">
+      </div>
+      <div class="field">
+        <label for="pw-repeat">New password again</label>
+        <input type="password" id="pw-repeat" autocomplete="new-password" required minlength="10">
+      </div>
+      <p class="error-line" id="pw-error"></p>
+      <p class="ok-line" id="pw-ok"></p>
+      <button class="btn primary" type="submit">Change password</button>
+      <p class="sub" style="margin-top:12px">
+        Changing your password signs you out on every other device and SFTP
+        keeps using the new password immediately.
+      </p>
+    </form>
+  </div>
+
+  <div class="panel">
+    <h2>Account</h2>
+    <dl class="kv" id="account-kv"></dl>
+  </div>
+</div>
+
+<script src="/assets/api.js"></script>
+<script src="/assets/shell.js"></script>
+<script src="/assets/settings.js"></script>
+</body>
+</html>

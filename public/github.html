@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>strongroom — github puller</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<div id="app">
+  <div class="panel">
+    <h2>Pull a repository</h2>
+    <p class="sub" style="margin-bottom:14px">Paste a public GitHub URL. First pull clones it; later pulls fast-forward it.</p>
+    <form id="pull-form" class="row" style="align-items:flex-start">
+      <div style="flex:1; min-width: 240px">
+        <input type="url" id="repo-url" placeholder="https://github.com/owner/repo" spellcheck="false" aria-label="Repository URL">
+        <p class="error-line" id="pull-error"></p>
+      </div>
+      <button class="btn primary" type="submit" id="pull-btn">Pull</button>
+    </form>
+    <div class="log-pane" id="log-pane" hidden aria-live="polite"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Repositories on the server</h2>
+    <div class="table-wrap" style="border:none">
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Status</th>
+            <th class="optional">Last updated</th>
+          </tr>
+        </thead>
+        <tbody id="repo-rows"></tbody>
+      </table>
+    </div>
+    <div class="empty" id="repo-empty" hidden>
+      No repositories yet.
+      <span class="mono">pull one with the form above</span>
+    </div>
+  </div>
+</div>
+
+<script src="/assets/api.js"></script>
+<script src="/assets/shell.js"></script>
+<script src="/assets/github.js"></script>
+</body>
+</html>

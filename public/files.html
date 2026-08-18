@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>strongroom — files</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<div id="app">
+  <div class="spread">
+    <div class="row">
+      <button class="btn primary" id="upload-btn">Upload</button>
+      <button class="btn" id="mkdir-btn">New folder</button>
+      <button class="btn danger" id="delete-btn" disabled>Delete</button>
+    </div>
+    <div class="dropzone" id="dropzone">drop files anywhere to upload</div>
+  </div>
+  <input type="file" id="file-input" multiple hidden>
+
+  <div class="panel" id="upload-panel" hidden>
+    <h2>Uploads</h2>
+    <div class="upload-list" id="upload-list"></div>
+  </div>
+
+  <div class="table-wrap">
+    <table id="file-table">
+      <thead>
+        <tr>
+          <th style="width:34px"><input type="checkbox" id="select-all" aria-label="Select all"></th>
+          <th>Name</th>
+          <th class="optional">Type</th>
+          <th style="text-align:right">Size</th>
+          <th class="optional">Modified</th>
+          <th style="width:1%"></th>
+        </tr>
+      </thead>
+      <tbody id="file-rows"></tbody>
+    </table>
+    <div class="empty" id="empty-state" hidden>
+      This folder is empty.
+      <span class="mono">upload files or create a folder to get started</span>
+    </div>
+  </div>
+</div>
+
+<dialog id="mkdir-dialog">
+  <h2>New folder</h2>
+  <form method="dialog">
+    <div class="field">
+      <label for="mkdir-name">Folder name</label>
+      <input type="text" id="mkdir-name" autocomplete="off" spellcheck="false">
+    </div>
+    <p class="error-line" id="mkdir-error"></p>
+    <div class="dialog-actions">
+      <button class="btn" value="cancel">Cancel</button>
+      <button class="btn primary" id="mkdir-confirm" value="default">Create</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="rename-dialog">
+  <h2>Rename</h2>
+  <form method="dialog">
+    <div class="field">
+      <label for="rename-name">New name</label>
+      <input type="text" id="rename-name" autocomplete="off" spellcheck="false">
+    </div>
+    <p class="error-line" id="rename-error"></p>
+    <div class="dialog-actions">
+      <button class="btn" value="cancel">Cancel</button>
+      <button class="btn primary" id="rename-confirm" value="default">Rename</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="delete-dialog">
+  <h2>Delete</h2>
+  <p class="sub" id="delete-summary"></p>
+  <div class="dialog-actions">
+    <button class="btn" id="delete-cancel">Cancel</button>
+    <button class="btn danger" id="delete-confirm">Delete</button>
+  </div>
+</dialog>
+
+<dialog id="preview-dialog" class="preview-dialog">
+  <div class="spread" style="margin-bottom:12px">
+    <h2 class="mono" id="preview-title" style="margin:0"></h2>
+    <div class="row">
+      <button class="btn-ghost" id="preview-download">download</button>
+      <button class="btn-ghost" id="preview-close">close</button>
+    </div>
+  </div>
+  <div class="preview-body" id="preview-body"></div>
+</dialog>
+
+<script src="/assets/api.js"></script>
+<script src="/assets/shell.js"></script>
+<script src="/assets/files.js"></script>
+</body>
+</html>

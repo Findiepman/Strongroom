@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>strongroom — admin</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<div id="app">
+  <div class="panel">
+    <h2>Accounts</h2>
+    <div class="table-wrap" style="border:none">
+      <table>
+        <thead>
+          <tr>
+            <th>User</th>
+            <th>Role</th>
+            <th>Used</th>
+            <th>Quota (GB)</th>
+            <th class="optional">Sessions</th>
+            <th style="width:1%"></th>
+          </tr>
+        </thead>
+        <tbody id="user-rows"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>New account</h2>
+    <form id="create-form">
+      <div class="field-row">
+        <div class="field">
+          <label for="new-username">Username</label>
+          <input type="text" id="new-username" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="lowercase, 3-32 chars">
+        </div>
+        <div class="field">
+          <label for="new-password">Password</label>
+          <input type="text" id="new-password" autocomplete="off" spellcheck="false" placeholder="min 10 chars">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="new-role">Role</label>
+          <select id="new-role">
+            <option value="user">user</option>
+            <option value="admin">admin</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="new-quota">Quota (GB)</label>
+          <input type="number" id="new-quota" value="10" min="1" step="1">
+        </div>
+      </div>
+      <p class="error-line" id="create-error"></p>
+      <button class="btn primary" type="submit">Create account</button>
+    </form>
+  </div>
+
+  <div class="panel">
+    <div class="spread" style="margin-bottom:12px">
+      <h2 style="margin:0">Audit log</h2>
+      <div class="row">
+        <select id="audit-action" aria-label="Filter by action" style="width:auto">
+          <option value="">all actions</option>
+          <option value="login.success">login.success</option>
+          <option value="login.fail">login.fail</option>
+          <option value="logout">logout</option>
+          <option value="upload">upload</option>
+          <option value="upload.blocked">upload.blocked</option>
+          <option value="download">download</option>
+          <option value="preview">preview</option>
+          <option value="delete">delete</option>
+          <option value="rename">rename</option>
+          <option value="mkdir">mkdir</option>
+          <option value="password.change">password.change</option>
+          <option value="repo.pull">repo.pull</option>
+          <option value="sftp.login">sftp.login</option>
+          <option value="sftp.login.fail">sftp.login.fail</option>
+          <option value="sftp.upload">sftp.upload</option>
+          <option value="sftp.delete">sftp.delete</option>
+          <option value="user.create">user.create</option>
+          <option value="user.delete">user.delete</option>
+          <option value="user.force_logout">user.force_logout</option>
+          <option value="quota.set">quota.set</option>
+        </select>
+        <input type="text" id="audit-user" placeholder="filter by user" style="width:140px" aria-label="Filter by user">
+      </div>
+    </div>
+    <div class="table-wrap" style="border:none">
+      <table>
+        <thead>
+          <tr>
+            <th>When</th>
+            <th>User</th>
+            <th>Action</th>
+            <th>Detail</th>
+            <th class="optional">IP</th>
+          </tr>
+        </thead>
+        <tbody id="audit-rows"></tbody>
+      </table>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button class="btn" id="audit-more">Load more</button>
+      <span class="sub mono" id="audit-count"></span>
+    </div>
+  </div>
+</div>
+
+<dialog id="confirm-dialog">
+  <h2 id="confirm-title"></h2>
+  <p class="sub" id="confirm-text"></p>
+  <div class="dialog-actions">
+    <button class="btn" id="confirm-cancel">Cancel</button>
+    <button class="btn danger" id="confirm-ok">Confirm</button>
+  </div>
+</dialog>
+
+<script src="/assets/api.js"></script>
+<script src="/assets/shell.js"></script>
+<script src="/assets/admin.js"></script>
+</body>
+</html>

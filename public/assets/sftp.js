@@ -9,7 +9,7 @@ function copyBtn(getText) {
         e.target.textContent = 'copied';
         setTimeout(() => { e.target.textContent = 'copy'; }, 1500);
       } catch {
-        toast('Copy failed — select the text manually', true);
+        toast('Copy failed. Select the text manually', true);
       }
     },
   }, 'copy');

@@ -276,8 +276,8 @@ function startSftpServer() {
     client.on('error', () => { /* connection reset etc.; nothing to do */ });
   });
 
-  server.listen(config.SFTP_PORT, config.HOST, () => {
-    console.log(`[sftp] listening on ${config.HOST}:${config.SFTP_PORT} (users jailed to ${config.SFTP_ROOT}${path.sep}<username>)`);
+  server.listen(config.SFTP_PORT, config.SFTP_HOST, () => {
+    console.log(`[sftp] listening on ${config.SFTP_HOST}:${config.SFTP_PORT} (users jailed to ${config.SFTP_ROOT}${path.sep}<username>)`);
   });
   server.on('error', (err) => console.error('[sftp] server error:', err.message));
   return server;

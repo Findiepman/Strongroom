@@ -1,4 +1,4 @@
-/* strongroom — design system
+/* strongroom design system
    Tokens: 5 hexes. Everything else is derived.
    Voices: Space Grotesk = interface, IBM Plex Mono = data. */
 
@@ -333,6 +333,7 @@ input[type="checkbox"]:checked::after {
 /* ---------- Dialogs ---------- */
 
 dialog {
+  margin: auto; /* the * reset removes the UA centering; restore it */
   background: var(--surface);
   color: var(--ink);
   border: 1px solid var(--line-strong);

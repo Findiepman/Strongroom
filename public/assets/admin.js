@@ -120,10 +120,10 @@ async function loadAudit(reset) {
     const isFail = /fail|blocked/.test(r.action);
     auditRows.append(el('tr', {},
       el('td', { class: 'num' }, fmtDate(r.created_at)),
-      el('td', { class: 'mono' }, r.username || '—'),
+      el('td', { class: 'mono' }, r.username || '-'),
       el('td', {}, el('span', { class: 'tag' + (isFail ? ' red' : '') }, r.action)),
       el('td', { class: 'mono', style: 'white-space:normal; word-break:break-all; font-size:12px; color:var(--muted)' }, r.detail || ''),
-      el('td', { class: 'num optional' }, r.ip || '—')));
+      el('td', { class: 'num optional' }, r.ip || '-')));
   }
   document.getElementById('audit-count').textContent = `${auditState.offset} of ${auditState.total}`;
   document.getElementById('audit-more').disabled = auditState.offset >= auditState.total;

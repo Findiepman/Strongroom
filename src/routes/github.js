@@ -37,7 +37,7 @@ function sanitizeGitLine(raw) {
 }
 
 function friendlyError(exitCode, rawOutput) {
-  if (/Repository not found|fatal: repository .+ not found/i.test(rawOutput)) return 'Repository not found. Check the URL — private repos are not supported.';
+  if (/Repository not found|fatal: repository .+ not found/i.test(rawOutput)) return 'Repository not found. Check the URL, private repos are not supported.';
   if (/could not resolve host|unable to access/i.test(rawOutput)) return 'Could not reach the git host. Check the server\'s network connection.';
   if (/Authentication failed|could not read Username|Permission denied/i.test(rawOutput)) return 'The repository requires authentication. Only public repos are supported.';
   if (/not a git repository/i.test(rawOutput)) return 'The target folder exists but is not a git repository. Remove it and pull again.';

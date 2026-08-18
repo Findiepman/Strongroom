@@ -36,7 +36,7 @@ function watchJob(jobId) {
   });
   eventSource.onerror = () => {
     if (eventSource && eventSource.readyState === EventSource.CLOSED) {
-      logLine('Lost the live log stream. The pull may still be running — refresh to check.', 'fail');
+      logLine('Lost the live log stream. The pull may still be running, refresh to check.', 'fail');
       Shell.busy(false);
       pullBtn.disabled = false;
     }
@@ -74,7 +74,12 @@ async function loadRepos() {
         el('td', {}, el('div', { class: 'row', style: 'flex-wrap:nowrap' },
           el('span', { class: 'led' + (r.running ? ' on' : '') }),
           el('span', { class: 'mono', style: 'font-size:12px; color:var(--muted)' }, r.running ? 'pulling' : 'idle'))),
-        el('td', { class: 'num optional' }, fmtDate(r.mtime))));
+        el('td', { class: 'num optional' }, fmtDate(r.mtime)),
+        el('td', { class: 'actions' },
+          el('a', {
+            class: 'btn-ghost', style: 'text-decoration:none',
+            href: '/files?path=' + encodeURIComponent('/repos/' + r.name),
+          }, 'browse'))));
       if (r.running && r.jobId && !eventSource) watchJob(r.jobId);
     }
   } catch (err) {

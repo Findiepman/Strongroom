@@ -1,6 +1,6 @@
 'use strict';
 
-// Shared API helper. CSRF token lives in memory only — never in storage.
+// Shared API helper. CSRF token lives in memory only, never in storage.
 const API = {
   csrf: null,
   user: null,
@@ -36,7 +36,7 @@ const API = {
 };
 
 function fmtBytes(n) {
-  if (n == null) return '—';
+  if (n == null) return '-';
   if (n === 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   const i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), units.length - 1);
@@ -45,7 +45,7 @@ function fmtBytes(n) {
 }
 
 function fmtDate(ms) {
-  if (!ms) return '—';
+  if (!ms) return '-';
   const d = new Date(ms);
   const pad = (x) => String(x).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;

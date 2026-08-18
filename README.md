@@ -61,6 +61,7 @@ runs entirely out of `./data/` and generates its own dev JWT secret.
 | `DEFAULT_QUOTA_BYTES` | `10737418240` | Quota for new users (10 GiB) unless the admin sets one |
 | `SFTP_ENABLED` | `true` | Turn the SFTP service on/off |
 | `SFTP_PORT` | `2222` | SFTP listen port |
+| `SFTP_HOST` | same as `HOST` | Bind address for SFTP only. Lets the web app hide on `127.0.0.1` behind a tunnel while SFTP stays on `0.0.0.0` for a forwarded port |
 | `SFTP_PUBLIC_HOST` | request host | Hostname shown on the SFTP page |
 | `GIT_ALLOW_ANY_HTTPS_HOST` | `false` | `true` allows any https git host, not just github.com |
 | `GIT_TIMEOUT_SECONDS` | `300` | Kill a clone/pull after this long |
@@ -155,6 +156,99 @@ server {
 
 Set `TRUST_PROXY=true` and `HOST=127.0.0.1` in `.env`. SFTP (port 2222) is its
 own protocol — expose it directly or via your firewall, not through nginx.
+
+## Access from anywhere with Cloudflare Tunnel
+
+A Cloudflare Tunnel makes the web UI reachable from anywhere over HTTPS
+without opening any router ports. The `cloudflared` daemon on your server
+dials out to Cloudflare, and Cloudflare routes your public hostname to
+`localhost:8080`. TLS is handled for you, which the Secure cookie needs.
+
+Do not try to host the frontend separately (for example on GitHub Pages).
+The server already serves the whole UI, and the SameSite=Strict session
+cookie will not cross from another site to your API anyway.
+
+### Quick test, one command
+
+```bash
+cloudflared tunnel --url http://localhost:8080
+```
+
+No account needed. It prints a random `https://<something>.trycloudflare.com`
+URL you can open from your phone. The URL changes every run, so use a named
+tunnel for real use.
+
+### Permanent tunnel with your own hostname
+
+You need a free Cloudflare account with a domain added to it (a cheap or free
+domain works, as long as its nameservers point at Cloudflare).
+
+**1. Install cloudflared**
+
+```bash
+# Debian/Ubuntu
+curl -L https://pkg.cloudflare.com/cloudflared-stable-linux-amd64.deb -o cloudflared.deb
+sudo dpkg -i cloudflared.deb
+
+# Windows
+winget install Cloudflare.cloudflared
+```
+
+**2. Sign in and create the tunnel**
+
+```bash
+cloudflared tunnel login                                # opens a browser, pick your domain
+cloudflared tunnel create strongroom                    # prints the tunnel id
+cloudflared tunnel route dns strongroom files.example.com
+```
+
+**3. Configure it**
+
+Create `~/.cloudflared/config.yml` (Windows:
+`C:\Users\<you>\.cloudflared\config.yml`):
+
+```yaml
+tunnel: strongroom
+credentials-file: /home/<you>/.cloudflared/<tunnel-id>.json
+
+ingress:
+  - hostname: files.example.com
+    service: http://localhost:8080
+  - service: http_status:404
+```
+
+**4. Point the app at it** in `.env`:
+
+```
+NODE_ENV=production
+JWT_SECRET=<generate one, see Setup>
+TRUST_PROXY=true
+HOST=127.0.0.1        # web app is only reachable through the tunnel
+SFTP_HOST=0.0.0.0     # keep SFTP reachable directly (see below)
+```
+
+**5. Run it**
+
+```bash
+cloudflared tunnel run strongroom     # foreground, good for a first test
+sudo cloudflared service install      # then install it as a service (works on Windows too)
+```
+
+Restart strongroom, open `https://files.example.com` and sign in.
+
+### SFTP and the tunnel
+
+The tunnel carries HTTP only, so SFTP does not go through it. Pick one:
+
+- **Port forward.** Forward TCP 2222 on your router to the server. SFTP is
+  already encrypted, so exposing it directly is fine. This is what
+  `SFTP_HOST=0.0.0.0` above is for.
+- **Tailscale.** Install it on the server and your devices, then connect to
+  the server's Tailscale IP on port 2222. Nothing is exposed publicly.
+- **Through Cloudflare anyway.** Add a second hostname with
+  `service: ssh://localhost:2222` to the ingress, then each client runs
+  `cloudflared access tcp --hostname sftp.example.com --url localhost:2222`
+  and connects to `localhost:2222`. Works, but every device needs cloudflared.
 
 ## Security model
 

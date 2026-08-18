@@ -4,6 +4,7 @@ const state = {
   path: '/',
   entries: [],
   selected: new Set(),
+  readOnly: false,
 };
 
 const rowsEl = document.getElementById('file-rows');
@@ -19,6 +20,7 @@ function joinPath(base, name) {
 }
 
 function typeTag(entry) {
+  if (entry.repo) return 'git';
   if (entry.dir) return 'dir';
   const m = entry.mime || '';
   if (m.startsWith('image/')) return 'img';
@@ -58,6 +60,16 @@ function updateDeleteBtn() {
   deleteBtn.textContent = n > 1 ? `Delete (${n})` : 'Delete';
 }
 
+function updateToolbar() {
+  const ro = state.readOnly;
+  document.getElementById('upload-btn').disabled = ro;
+  document.getElementById('mkdir-btn').disabled = ro;
+  selectAllEl.disabled = ro;
+  dropzone.textContent = ro
+    ? 'repos are read-only, update them with the github puller'
+    : 'drop files anywhere to upload';
+}
+
 function render() {
   rowsEl.textContent = '';
   state.selected.clear();
@@ -67,15 +79,16 @@ function render() {
 
   for (const entry of state.entries) {
     const full = joinPath(state.path, entry.name);
-    const check = el('input', {
+    const selectable = !state.readOnly && !entry.repo;
+    const check = selectable ? el('input', {
       type: 'checkbox', 'aria-label': `Select ${entry.name}`,
       onchange: (e) => {
         if (e.target.checked) state.selected.add(full);
         else state.selected.delete(full);
-        selectAllEl.checked = state.selected.size === state.entries.length;
+        selectAllEl.checked = state.selected.size === state.entries.filter((x) => !x.repo).length;
         updateDeleteBtn();
       },
-    });
+    }) : null;
 
     const nameLink = el('a', {
       class: 'name-link', href: '#',
@@ -94,14 +107,16 @@ function render() {
     if (!entry.dir) {
       actions.push(el('button', { class: 'btn-ghost', onclick: () => download(full) }, 'get'));
     }
-    actions.push(el('button', { class: 'btn-ghost', onclick: () => openRename(entry, full) }, 'ren'));
-    actions.push(el('button', { class: 'btn-ghost danger', onclick: () => openDelete([full]) }, 'del'));
+    if (selectable) {
+      actions.push(el('button', { class: 'btn-ghost', onclick: () => openRename(entry, full) }, 'ren'));
+      actions.push(el('button', { class: 'btn-ghost danger', onclick: () => openDelete([full]) }, 'del'));
+    }
 
     rowsEl.append(el('tr', { class: entry.dir ? 'is-dir' : '' },
       el('td', {}, check),
       el('td', {}, nameLink),
       el('td', { class: 'optional' }, el('span', { class: 'tag' + (entry.dir ? ' amber' : '') }, typeTag(entry))),
-      el('td', { class: 'num' }, entry.dir ? '—' : fmtBytes(entry.size)),
+      el('td', { class: 'num' }, entry.dir ? '-' : fmtBytes(entry.size)),
       el('td', { class: 'num optional' }, fmtDate(entry.mtime)),
       el('td', { class: 'actions' }, el('div', { class: 'row', style: 'flex-wrap: nowrap; justify-content: flex-end;' }, actions))));
   }
@@ -113,9 +128,13 @@ async function load(path) {
       const data = await API.call('/api/files/list?path=' + encodeURIComponent(path));
       state.path = data.path;
       state.entries = data.entries;
+      state.readOnly = !!data.readOnly;
       Shell.updateGauge(data.usedBytes, data.quotaBytes);
       updatePrompt();
+      updateToolbar();
       render();
+      const url = state.path === '/' ? '/files' : '/files?path=' + encodeURIComponent(state.path);
+      history.replaceState(null, '', url);
     } catch (err) {
       toast(err.message, true);
     }
@@ -137,7 +156,9 @@ function download(fullPath) {
 selectAllEl.addEventListener('change', () => {
   state.selected.clear();
   if (selectAllEl.checked) {
-    for (const entry of state.entries) state.selected.add(joinPath(state.path, entry.name));
+    for (const entry of state.entries) {
+      if (!entry.repo) state.selected.add(joinPath(state.path, entry.name));
+    }
   }
   rowsEl.querySelectorAll('input[type="checkbox"]').forEach((c) => { c.checked = selectAllEl.checked; });
   updateDeleteBtn();
@@ -165,6 +186,10 @@ document.addEventListener('drop', (e) => {
 });
 
 function uploadFiles(files) {
+  if (state.readOnly) {
+    toast('Repos are read-only here. Update them with the GitHub puller.', true);
+    return;
+  }
   uploadPanel.hidden = false;
   const targetPath = state.path;
   const queue = files.map((file) => {
@@ -368,5 +393,6 @@ document.getElementById('preview-download').addEventListener('click', () => down
 
 (async () => {
   await Shell.init('files');
-  await load('/');
+  const startPath = new URLSearchParams(window.location.search).get('path') || '/';
+  await load(startPath);
 })();

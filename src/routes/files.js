@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const express = require('express');
 const Busboy = require('busboy');
 const config = require('../config');
-const { db, audit, addUsedBytes, setUsedBytes } = require('../db');
+const { db, audit, addUsedBytes } = require('../db');
 const { requireAuth, csrfProtect } = require('../middleware/auth');
 const { safeResolve, validateName, relDisplay, dirSize, PathError } = require('../util/paths');
 const { validateUpload, previewType, guessMime } = require('../util/filetype');
@@ -19,22 +19,54 @@ function userRoot(req) {
   return root;
 }
 
+// Client paths live in one virtual tree: the user's own storage, plus a
+// read-only "/repos" mount that maps onto REPOS_ROOT (the GitHub puller's
+// sandbox). Everything resolves through safeResolve against its real root.
+function resolveTarget(req, relPath) {
+  const raw = String(relPath == null ? '' : relPath).replace(/\\/g, '/');
+  const m = raw.match(/^\/?repos(?:\/(.*))?$/);
+  if (m) {
+    const abs = safeResolve(config.REPOS_ROOT, m[1] || '');
+    return { abs, root: config.REPOS_ROOT, readOnly: true, prefix: '/repos' };
+  }
+  const root = userRoot(req);
+  return { abs: safeResolve(root, raw), root, readOnly: false, prefix: '' };
+}
+
+function displayPath(t) {
+  const rd = relDisplay(t.root, t.abs);
+  if (!t.prefix) return rd;
+  return rd === '/' ? t.prefix : t.prefix + rd;
+}
+
+// "repos" is reserved at the top level of user storage so a real file or
+// folder can never shadow the virtual mount.
+function assertNotReserved(destDir, root, name) {
+  if (path.resolve(destDir) === path.resolve(root) && name.toLowerCase() === 'repos') {
+    throw new PathError('The name "repos" is reserved at the top level');
+  }
+}
+
+function readOnlyError(res) {
+  return res.status(403).json({ error: 'Repos are read-only here. Update them with the GitHub puller.' });
+}
+
 // GET /api/files/list?path=/docs
 router.get('/list', (req, res) => {
-  const root = userRoot(req);
-  const abs = safeResolve(root, req.query.path);
+  const t = resolveTarget(req, req.query.path);
   let stat;
   try {
-    stat = fs.statSync(abs);
+    stat = fs.statSync(t.abs);
   } catch {
     return res.status(404).json({ error: 'Folder not found' });
   }
   if (!stat.isDirectory()) return res.status(400).json({ error: 'Not a folder' });
 
-  const entries = fs.readdirSync(abs, { withFileTypes: true })
+  const entries = fs.readdirSync(t.abs, { withFileTypes: true })
     .filter((e) => e.isFile() || e.isDirectory())
+    .filter((e) => !(t.readOnly && e.name === '.git'))
     .map((e) => {
-      const p = path.join(abs, e.name);
+      const p = path.join(t.abs, e.name);
       let s;
       try { s = fs.statSync(p); } catch { return null; }
       return {
@@ -45,11 +77,18 @@ router.get('/list', (req, res) => {
         mime: e.isDirectory() ? null : guessMime(e.name),
       };
     })
-    .filter(Boolean)
-    .sort((a, b) => (a.dir !== b.dir ? (a.dir ? -1 : 1) : a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })));
+    .filter(Boolean);
+
+  // The virtual repos mount appears at the top of the user's own root.
+  if (!t.readOnly && t.abs === path.resolve(t.root)) {
+    entries.push({ name: 'repos', dir: true, size: null, mtime: null, mime: null, repo: true });
+  }
+
+  entries.sort((a, b) => (a.dir !== b.dir ? (a.dir ? -1 : 1) : a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })));
 
   res.json({
-    path: relDisplay(root, abs),
+    path: displayPath(t),
+    readOnly: t.readOnly,
     entries,
     usedBytes: req.user.used_bytes,
     quotaBytes: req.user.quota_bytes,
@@ -58,14 +97,16 @@ router.get('/list', (req, res) => {
 
 // POST /api/files/upload?path=/docs&overwrite=0  (multipart, one or many files)
 router.post('/upload', (req, res, next) => {
-  const root = userRoot(req);
-  let destDir;
+  let target;
   try {
-    destDir = safeResolve(root, req.query.path);
-    if (!fs.statSync(destDir).isDirectory()) throw new PathError('Not a folder');
+    target = resolveTarget(req, req.query.path);
+    if (target.readOnly) return readOnlyError(res);
+    if (!fs.statSync(target.abs).isDirectory()) throw new PathError('Not a folder');
   } catch (err) {
     return next(err);
   }
+  const root = target.root;
+  const destDir = target.abs;
   const overwrite = req.query.overwrite === '1';
 
   let busboy;
@@ -87,6 +128,7 @@ router.post('/upload', (req, res, next) => {
     let name;
     try {
       name = validateName(path.basename(info.filename || ''));
+      assertNotReserved(destDir, root, name);
     } catch (err) {
       results.push({ name: String(info.filename || '').slice(0, 100), ok: false, error: err.message });
       stream.resume();
@@ -171,69 +213,68 @@ router.post('/upload', (req, res, next) => {
 
 // GET /api/files/download?path=/docs/report.pdf
 router.get('/download', (req, res) => {
-  const root = userRoot(req);
-  const abs = safeResolve(root, req.query.path);
+  const t = resolveTarget(req, req.query.path);
   let stat;
-  try { stat = fs.statSync(abs); } catch {
+  try { stat = fs.statSync(t.abs); } catch {
     return res.status(404).json({ error: 'File not found' });
   }
   if (!stat.isFile()) return res.status(400).json({ error: 'Not a file' });
-  audit({ userId: req.user.id, username: req.user.username, action: 'download', detail: relDisplay(root, abs), ip: req.ip });
+  audit({ userId: req.user.id, username: req.user.username, action: 'download', detail: displayPath(t), ip: req.ip });
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.download(abs, path.basename(abs));
+  res.download(t.abs, path.basename(t.abs));
 });
 
-// GET /api/files/preview?path=/notes.txt — inline for image/pdf/text only
+// GET /api/files/preview?path=/notes.txt  (inline for image/pdf/text only)
 router.get('/preview', (req, res) => {
-  const root = userRoot(req);
-  const abs = safeResolve(root, req.query.path);
+  const t = resolveTarget(req, req.query.path);
   let stat;
-  try { stat = fs.statSync(abs); } catch {
+  try { stat = fs.statSync(t.abs); } catch {
     return res.status(404).json({ error: 'File not found' });
   }
   if (!stat.isFile()) return res.status(400).json({ error: 'Not a file' });
-  const pv = previewType(abs, path.basename(abs));
+  const pv = previewType(t.abs, path.basename(t.abs));
   if (!pv) return res.status(415).json({ error: 'No in-browser preview for this file type. Download it instead.' });
-  audit({ userId: req.user.id, username: req.user.username, action: 'preview', detail: relDisplay(root, abs), ip: req.ip });
+  audit({ userId: req.user.id, username: req.user.username, action: 'preview', detail: displayPath(t), ip: req.ip });
   res.setHeader('Content-Type', pv.contentType);
   res.setHeader('Content-Length', stat.size);
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(path.basename(abs))}`);
+  res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(path.basename(t.abs))}`);
   res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'");
-  fs.createReadStream(abs).pipe(res);
+  fs.createReadStream(t.abs).pipe(res);
 });
 
 // POST /api/files/mkdir {path, name}
 router.post('/mkdir', (req, res) => {
-  const root = userRoot(req);
   const { path: rel, name } = req.body || {};
-  const parent = safeResolve(root, rel);
+  const t = resolveTarget(req, rel);
+  if (t.readOnly) return readOnlyError(res);
   const cleanName = validateName(name);
-  const abs = path.join(parent, cleanName);
+  assertNotReserved(t.abs, t.root, cleanName);
+  const abs = path.join(t.abs, cleanName);
   if (fs.existsSync(abs)) return res.status(409).json({ error: 'A file or folder with this name already exists' });
   fs.mkdirSync(abs);
-  audit({ userId: req.user.id, username: req.user.username, action: 'mkdir', detail: relDisplay(root, abs), ip: req.ip });
+  audit({ userId: req.user.id, username: req.user.username, action: 'mkdir', detail: relDisplay(t.root, abs), ip: req.ip });
   res.json({ ok: true });
 });
 
 // POST /api/files/rename {path, newName}
 router.post('/rename', (req, res) => {
-  const root = userRoot(req);
   const { path: rel, newName } = req.body || {};
-  const abs = safeResolve(root, rel);
-  if (abs === path.resolve(root)) return res.status(400).json({ error: 'Cannot rename the root folder' });
-  if (!fs.existsSync(abs)) return res.status(404).json({ error: 'File not found' });
+  const t = resolveTarget(req, rel);
+  if (t.readOnly) return readOnlyError(res);
+  if (t.abs === path.resolve(t.root)) return res.status(400).json({ error: 'Cannot rename the root folder' });
+  if (!fs.existsSync(t.abs)) return res.status(404).json({ error: 'File not found' });
   const cleanName = validateName(newName);
-  const dest = path.join(path.dirname(abs), cleanName);
+  assertNotReserved(path.dirname(t.abs), t.root, cleanName);
+  const dest = path.join(path.dirname(t.abs), cleanName);
   if (fs.existsSync(dest)) return res.status(409).json({ error: 'A file with the new name already exists' });
-  fs.renameSync(abs, dest);
-  audit({ userId: req.user.id, username: req.user.username, action: 'rename', detail: `${relDisplay(root, abs)} -> ${cleanName}`, ip: req.ip });
+  fs.renameSync(t.abs, dest);
+  audit({ userId: req.user.id, username: req.user.username, action: 'rename', detail: `${relDisplay(t.root, t.abs)} -> ${cleanName}`, ip: req.ip });
   res.json({ ok: true });
 });
 
 // POST /api/files/delete {paths: ["/a.txt", "/docs"]}
 router.post('/delete', (req, res) => {
-  const root = userRoot(req);
   const { paths } = req.body || {};
   if (!Array.isArray(paths) || paths.length === 0 || paths.length > 200) {
     return res.status(400).json({ error: 'Send between 1 and 200 paths' });
@@ -242,13 +283,14 @@ router.post('/delete', (req, res) => {
   let freed = 0;
   for (const rel of paths) {
     try {
-      const abs = safeResolve(root, rel);
-      if (abs === path.resolve(root)) throw new PathError('Cannot delete the root folder');
-      const stat = fs.lstatSync(abs);
-      const size = stat.isDirectory() ? dirSize(abs) : stat.size;
-      fs.rmSync(abs, { recursive: true, force: false });
+      const t = resolveTarget(req, rel);
+      if (t.readOnly) throw new PathError('Repos are read-only here');
+      if (t.abs === path.resolve(t.root)) throw new PathError('Cannot delete the root folder');
+      const stat = fs.lstatSync(t.abs);
+      const size = stat.isDirectory() ? dirSize(t.abs) : stat.size;
+      fs.rmSync(t.abs, { recursive: true, force: false });
       freed += size;
-      audit({ userId: req.user.id, username: req.user.username, action: 'delete', detail: `${relDisplay(root, abs)} (${size} bytes)`, ip: req.ip });
+      audit({ userId: req.user.id, username: req.user.username, action: 'delete', detail: `${relDisplay(t.root, t.abs)} (${size} bytes)`, ip: req.ip });
       results.push({ path: rel, ok: true });
     } catch (err) {
       results.push({ path: String(rel).slice(0, 200), ok: false, error: err.code === 'ENOENT' ? 'Not found' : (err.message || 'Delete failed') });

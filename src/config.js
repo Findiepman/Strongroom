@@ -45,6 +45,7 @@ const config = {
 
   SFTP_ENABLED: bool(process.env.SFTP_ENABLED, true),
   SFTP_PORT: int(process.env.SFTP_PORT, 2222),
+  SFTP_HOST: process.env.SFTP_HOST || process.env.HOST || '0.0.0.0',
   SFTP_PUBLIC_HOST: process.env.SFTP_PUBLIC_HOST || '',
 
   GIT_ALLOW_ANY_HTTPS_HOST: bool(process.env.GIT_ALLOW_ANY_HTTPS_HOST, false),

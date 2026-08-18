@@ -27,6 +27,9 @@ app.use(helmet({
       baseUri: ["'self'"],
       formAction: ["'self'"],
       frameAncestors: ["'none'"],
+      // Helmet adds this by default; it breaks plain-http LAN access by
+      // forcing every asset request to https. TLS is the proxy's job.
+      upgradeInsecureRequests: null,
     },
   },
   referrerPolicy: { policy: 'no-referrer' },

@@ -254,7 +254,8 @@ router.get('/download-zip', (req, res) => {
     console.error('[zip]', err);
     res.destroy();
   });
-  req.on('close', () => archive.abort());
+  // res 'close' fires on normal finish too; only abort if the client bailed.
+  res.on('close', () => { if (!res.writableFinished) archive.abort(); });
   archive.pipe(res);
   // Repo zips leave out .git internals, matching what the listing shows.
   const gitGlobs = ['.git', '.git/**', '**/.git', '**/.git/**'];

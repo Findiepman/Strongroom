@@ -167,7 +167,8 @@ router.get('/repos', (req, res) => {
     .map((e) => {
       const stat = fs.statSync(path.join(config.REPOS_ROOT, e.name));
       const job = [...jobs.values()].find((j) => j.repo === e.name && j.status === 'running');
-      return { name: e.name, mtime: stat.mtimeMs, running: !!job, jobId: job ? job.id : null };
+      const hasIndex = fs.existsSync(path.join(config.REPOS_ROOT, e.name, 'index.html'));
+      return { name: e.name, mtime: stat.mtimeMs, running: !!job, jobId: job ? job.id : null, hasIndex };
     })
     .sort((a, b) => b.mtime - a.mtime);
   res.json({ repos });

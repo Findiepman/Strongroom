@@ -82,6 +82,20 @@ app.get('/admin', pageAuth, (req, res) => {
 
 app.use('/assets', express.static(path.join(PUBLIC_DIR, 'assets'), { maxAge: '1h' }));
 
+// --- Live preview of pulled repos ---
+// Serves a repo folder as a static site so frontend-only apps run straight
+// from the browser (/live/<repo>/). Same session gate as the app pages.
+// Dotfiles (.git and friends) are ignored by express.static's default.
+const liveStatic = express.static(config.REPOS_ROOT, { fallthrough: false });
+app.use('/live', (req, res, next) => {
+  resolveSession(req, res);
+  if (!req.user) return res.redirect('/');
+  // The app's strict CSP would break previewed code (inline scripts, CDN
+  // assets). The preview tab intentionally runs unpoliced.
+  res.removeHeader('Content-Security-Policy');
+  liveStatic(req, res, next);
+});
+
 app.use('/api', (req, res) => res.status(404).json({ error: 'No such endpoint' }));
 app.use((req, res) => res.redirect('/'));
 

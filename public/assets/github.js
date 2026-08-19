@@ -76,6 +76,11 @@ async function loadRepos() {
           el('span', { class: 'mono', style: 'font-size:12px; color:var(--muted)' }, r.running ? 'pulling' : 'idle'))),
         el('td', { class: 'num optional' }, fmtDate(r.mtime)),
         el('td', { class: 'actions' },
+          r.hasIndex ? el('a', {
+            class: 'btn-ghost', style: 'text-decoration:none',
+            href: '/live/' + encodeURIComponent(r.name) + '/',
+            target: '_blank', rel: 'noopener',
+          }, 'go live') : null,
           el('a', {
             class: 'btn-ghost', style: 'text-decoration:none',
             href: '/files?path=' + encodeURIComponent('/repos/' + r.name),

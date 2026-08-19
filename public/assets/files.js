@@ -63,6 +63,7 @@ function updateDeleteBtn() {
 function updateToolbar() {
   const ro = state.readOnly;
   document.getElementById('upload-btn').disabled = ro;
+  document.getElementById('upload-folder-btn').disabled = ro;
   document.getElementById('mkdir-btn').disabled = ro;
   selectAllEl.disabled = ro;
   dropzone.textContent = ro
@@ -106,6 +107,8 @@ function render() {
     }
     if (!entry.dir) {
       actions.push(el('button', { class: 'btn-ghost', onclick: () => download(full) }, 'get'));
+    } else {
+      actions.push(el('button', { class: 'btn-ghost', onclick: () => downloadZip(full) }, 'zip'));
     }
     if (selectable) {
       actions.push(el('button', { class: 'btn-ghost', onclick: () => openRename(entry, full) }, 'ren'));
@@ -151,6 +154,15 @@ function download(fullPath) {
   a.remove();
 }
 
+function downloadZip(fullPath) {
+  const a = document.createElement('a');
+  a.href = '/api/files/download-zip?path=' + encodeURIComponent(fullPath);
+  a.download = '';
+  document.body.append(a);
+  a.click();
+  a.remove();
+}
+
 /* ---------- Selection ---------- */
 
 selectAllEl.addEventListener('change', () => {
@@ -170,6 +182,13 @@ document.getElementById('upload-btn').addEventListener('click', () => fileInput.
 fileInput.addEventListener('change', () => {
   if (fileInput.files.length) uploadFiles([...fileInput.files]);
   fileInput.value = '';
+});
+
+const folderInput = document.getElementById('folder-input');
+document.getElementById('upload-folder-btn').addEventListener('click', () => folderInput.click());
+folderInput.addEventListener('change', () => {
+  if (folderInput.files.length) uploadFiles([...folderInput.files]);
+  folderInput.value = '';
 });
 
 const dropzone = document.getElementById('dropzone');
@@ -193,15 +212,19 @@ function uploadFiles(files) {
   uploadPanel.hidden = false;
   const targetPath = state.path;
   const queue = files.map((file) => {
+    // Folder picks carry their path inside the chosen folder; keep it so the
+    // tree is rebuilt server-side.
+    const relPath = file.webkitRelativePath || '';
+    const subdir = relPath.includes('/') ? relPath.slice(0, relPath.lastIndexOf('/')) : '';
     const bar = el('div', { class: 'bar' });
     const status = el('span', {}, 'queued');
     const item = el('div', { class: 'upload-item' },
       el('div', { class: 'row1' },
-        el('span', { class: 'u-name' }, file.name),
+        el('span', { class: 'u-name' }, relPath || file.name),
         status),
       el('div', { class: 'progress' }, bar));
     uploadList.prepend(item);
-    return { file, bar, status };
+    return { file, subdir, bar, status };
   });
 
   // Sequential queue: predictable progress, no server flooding.
@@ -233,10 +256,28 @@ function uploadFiles(files) {
   })();
 }
 
-function uploadOne(job, targetPath) {
+async function uploadOne(job, targetPath) {
+  // Folder uploads are many small sequential requests; back off politely if
+  // they trip the server's rate limit.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await uploadRequest(job, targetPath);
+    } catch (err) {
+      if (err.status === 429 && attempt < 5) {
+        job.status.textContent = 'rate limited, waiting';
+        await new Promise((r) => setTimeout(r, 5000));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
+function uploadRequest(job, targetPath) {
   return new Promise((resolve, reject) => {
+    const dest = job.subdir ? joinPath(targetPath, job.subdir) : targetPath;
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/files/upload?path=' + encodeURIComponent(targetPath));
+    xhr.open('POST', '/api/files/upload?path=' + encodeURIComponent(dest) + (job.subdir ? '&mkdirs=1' : ''));
     xhr.setRequestHeader('X-CSRF-Token', API.csrf);
     xhr.responseType = 'json';
     xhr.upload.addEventListener('progress', (e) => {
@@ -251,7 +292,9 @@ function uploadOne(job, targetPath) {
         if (body.usedBytes !== undefined) Shell.updateGauge(body.usedBytes, body.quotaBytes);
         resolve(body.results[0] || { ok: false, error: 'No result returned' });
       } else {
-        reject(new Error(body.error || `Upload failed (${xhr.status})`));
+        const err = new Error(body.error || `Upload failed (${xhr.status})`);
+        err.status = xhr.status;
+        reject(err);
       }
     });
     xhr.addEventListener('error', () => reject(new Error('Network error during upload')));

@@ -14,12 +14,14 @@
   <div class="spread">
     <div class="row">
       <button class="btn primary" id="upload-btn">Upload</button>
+      <button class="btn" id="upload-folder-btn">Upload folder</button>
       <button class="btn" id="mkdir-btn">New folder</button>
       <button class="btn danger" id="delete-btn" disabled>Delete</button>
     </div>
     <div class="dropzone" id="dropzone">drop files anywhere to upload</div>
   </div>
   <input type="file" id="file-input" multiple hidden>
+  <input type="file" id="folder-input" webkitdirectory hidden>
 
   <div class="panel" id="upload-panel" hidden>
     <h2>Uploads</h2>

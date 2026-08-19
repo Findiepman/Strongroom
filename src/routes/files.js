@@ -4,6 +4,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const express = require('express');
 const Busboy = require('busboy');
+const archiver = require('archiver');
 const config = require('../config');
 const { db, audit, addUsedBytes } = require('../db');
 const { requireAuth, csrfProtect } = require('../middleware/auth');
@@ -101,6 +102,14 @@ router.post('/upload', (req, res, next) => {
   try {
     target = resolveTarget(req, req.query.path);
     if (target.readOnly) return readOnlyError(res);
+    // Folder uploads send files one by one with mkdirs=1 so their subtree is
+    // created on the fly; every new segment is validated like mkdir would.
+    if (req.query.mkdirs === '1' && !fs.existsSync(target.abs)) {
+      const segs = path.relative(path.resolve(target.root), target.abs).split(path.sep);
+      for (const seg of segs) validateName(seg);
+      assertNotReserved(path.resolve(target.root), target.root, segs[0]);
+      fs.mkdirSync(target.abs, { recursive: true });
+    }
     if (!fs.statSync(target.abs).isDirectory()) throw new PathError('Not a folder');
   } catch (err) {
     return next(err);
@@ -222,6 +231,41 @@ router.get('/download', (req, res) => {
   audit({ userId: req.user.id, username: req.user.username, action: 'download', detail: displayPath(t), ip: req.ip });
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.download(t.abs, path.basename(t.abs));
+});
+
+// GET /api/files/download-zip?path=/docs — stream a folder as a zip
+router.get('/download-zip', (req, res) => {
+  const t = resolveTarget(req, req.query.path);
+  let stat;
+  try { stat = fs.statSync(t.abs); } catch {
+    return res.status(404).json({ error: 'Folder not found' });
+  }
+  if (!stat.isDirectory()) return res.status(400).json({ error: 'Not a folder' });
+  const name = path.basename(t.abs) || 'storage';
+  audit({ userId: req.user.id, username: req.user.username, action: 'download.zip', detail: displayPath(t), ip: req.ip });
+
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(name + '.zip')}`);
+
+  const archive = archiver('zip', { zlib: { level: 6 } });
+  archive.on('warning', () => { /* files vanishing mid-walk are skipped */ });
+  archive.on('error', (err) => {
+    console.error('[zip]', err);
+    res.destroy();
+  });
+  req.on('close', () => archive.abort());
+  archive.pipe(res);
+  // Repo zips leave out .git internals, matching what the listing shows.
+  const gitGlobs = ['.git', '.git/**', '**/.git', '**/.git/**'];
+  archive.glob('**/*', {
+    cwd: t.abs,
+    dot: true,
+    follow: false,
+    ignore: t.readOnly ? gitGlobs : [],
+    skip: t.readOnly ? gitGlobs : [],
+  }, { prefix: name });
+  archive.finalize();
 });
 
 // GET /api/files/preview?path=/notes.txt  (inline for image/pdf/text only)

@@ -67,7 +67,7 @@ runs entirely out of `./data/` and generates its own dev JWT secret.
 | `GIT_TIMEOUT_SECONDS` | `300` | Kill a clone/pull after this long |
 | `TRUST_PROXY` | `false` | Set `true` behind nginx/caddy so rate limits see real IPs |
 
-## Mounting the 250 GB SSD as the storage root
+## Mounting the drive as the storage root
 
 Assuming the SSD shows up as `/dev/sdb` (check with `lsblk`):
 

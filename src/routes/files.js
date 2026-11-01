@@ -11,6 +11,7 @@ const { requireAuth, csrfProtect } = require('../middleware/auth');
 const { safeResolve, validateName, relDisplay, dirSize, PathError } = require('../util/paths');
 const { validateUpload, previewType, guessMime } = require('../util/filetype');
 const { assertNotReserved, moveIntoPlace } = require('../util/storage');
+const locks = require('../util/locks');
 
 const router = express.Router();
 router.use(requireAuth, csrfProtect);
@@ -24,15 +25,20 @@ function userRoot(req) {
 // Client paths live in one virtual tree: the user's own storage, plus a
 // read-only "/repos" mount that maps onto REPOS_ROOT (the GitHub puller's
 // sandbox). Everything resolves through safeResolve against its real root.
-function resolveTarget(req, relPath) {
+// A path inside a locked folder is refused (423) unless this session opened
+// it; { lockCheck: false } is only for the lock routes, which check themselves.
+function resolveTarget(req, relPath, { lockCheck = true } = {}) {
   const raw = String(relPath == null ? '' : relPath).replace(/\\/g, '/');
   const m = raw.match(/^\/?repos(?:\/(.*))?$/);
   if (m) {
     const abs = safeResolve(config.REPOS_ROOT, m[1] || '');
-    return { abs, root: config.REPOS_ROOT, readOnly: true, prefix: '/repos' };
+    return { abs, root: config.REPOS_ROOT, readOnly: true, prefix: '/repos', rel: null };
   }
   const root = userRoot(req);
-  return { abs: safeResolve(root, raw), root, readOnly: false, prefix: '' };
+  const abs = safeResolve(root, raw);
+  const rel = relDisplay(root, abs);
+  if (lockCheck) locks.assertAccess(req, rel);
+  return { abs, root, readOnly: false, prefix: '', rel };
 }
 
 function displayPath(t) {
@@ -56,6 +62,7 @@ router.get('/list', (req, res) => {
   }
   if (!stat.isDirectory()) return res.status(400).json({ error: 'Not a folder' });
 
+  const lv = t.readOnly ? null : locks.view(req);
   const entries = fs.readdirSync(t.abs, { withFileTypes: true })
     .filter((e) => e.isFile() || e.isDirectory())
     .filter((e) => !(t.readOnly && e.name === '.git'))
@@ -63,13 +70,16 @@ router.get('/list', (req, res) => {
       const p = path.join(t.abs, e.name);
       let s;
       try { s = fs.statSync(p); } catch { return null; }
-      return {
+      const entry = {
         name: e.name,
         dir: e.isDirectory(),
         size: e.isDirectory() ? null : s.size,
         mtime: s.mtimeMs,
         mime: e.isDirectory() ? null : guessMime(e.name),
       };
+      const lock = lv && e.isDirectory() ? lv.stateOf(relDisplay(t.root, p)) : null;
+      if (lock) entry.lock = lock;
+      return entry;
     })
     .filter(Boolean);
 
@@ -83,6 +93,8 @@ router.get('/list', (req, res) => {
   res.json({
     path: displayPath(t),
     readOnly: t.readOnly,
+    // Locked folders this folder is in (all open, or the request was refused).
+    lockedBy: lv ? locks.covering(lv.locks, t.rel).map((l) => l.relpath) : [],
     entries,
     usedBytes: req.user.used_bytes,
     quotaBytes: req.user.quota_bytes,
@@ -95,6 +107,7 @@ router.get('/search', (req, res) => {
   const q = String(req.query.q || '').trim().toLowerCase();
   if (q.length < 2) return res.status(400).json({ error: 'Type at least 2 characters' });
   const root = userRoot(req);
+  const lv = locks.view(req);
   const results = [];
   const MAX_RESULTS = 100;
   let budget = 20000;
@@ -108,7 +121,9 @@ router.get('/search', (req, res) => {
       if (--budget < 0 || results.length >= MAX_RESULTS) { truncated = true; break; }
       if (!e.isFile() && !e.isDirectory()) continue;
       const p = path.join(dir, e.name);
-      if (e.isDirectory()) stack.push(p);
+      const lock = e.isDirectory() ? lv.stateOf(relDisplay(root, p)) : null;
+      // A closed locked folder can be found by its name, but not looked into.
+      if (e.isDirectory() && !lv.blocking(relDisplay(root, p))) stack.push(p);
       if (!e.name.toLowerCase().includes(q)) continue;
       let s;
       try { s = fs.statSync(p); } catch { continue; }
@@ -119,6 +134,7 @@ router.get('/search', (req, res) => {
         size: e.isDirectory() ? null : s.size,
         mtime: s.mtimeMs,
         mime: e.isDirectory() ? null : guessMime(e.name),
+        ...(lock ? { lock } : {}),
       });
     }
     if (truncated) break;
@@ -259,6 +275,7 @@ router.get('/download', (req, res) => {
     return res.status(404).json({ error: 'File not found' });
   }
   if (!stat.isFile()) return res.status(400).json({ error: 'Not a file' });
+  if (req.query.check === '1') return res.json({ ok: true }); // the page asks first (locked folders)
   audit({ userId: req.user.id, username: req.user.username, action: 'download', detail: displayPath(t), ip: req.ip });
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.download(t.abs, path.basename(t.abs));
@@ -272,6 +289,8 @@ router.get('/download-zip', (req, res) => {
     return res.status(404).json({ error: 'Folder not found' });
   }
   if (!stat.isDirectory()) return res.status(400).json({ error: 'Not a folder' });
+  if (!t.readOnly) locks.assertInsideOpen(req, t.rel); // the zip would include locked folders inside it
+  if (req.query.check === '1') return res.json({ ok: true });
   const name = path.basename(t.abs) || 'storage';
   audit({ userId: req.user.id, username: req.user.username, action: 'download.zip', detail: displayPath(t), ip: req.ip });
 
@@ -341,6 +360,7 @@ router.post('/rename', (req, res) => {
   if (t.readOnly) return readOnlyError(res);
   if (t.abs === path.resolve(t.root)) return res.status(400).json({ error: 'Cannot rename the root folder' });
   if (!fs.existsSync(t.abs)) return res.status(404).json({ error: 'File not found' });
+  locks.assertRenamable(req, t.rel);
   const cleanName = validateName(newName);
   assertNotReserved(path.dirname(t.abs), t.root, cleanName);
   const dest = path.join(path.dirname(t.abs), cleanName);
@@ -363,6 +383,7 @@ router.post('/delete', (req, res) => {
       const t = resolveTarget(req, rel);
       if (t.readOnly) throw new PathError('Repos are read-only here');
       if (t.abs === path.resolve(t.root)) throw new PathError('Cannot delete the root folder');
+      locks.assertInsideOpen(req, t.rel);
       const stat = fs.lstatSync(t.abs);
       const size = stat.isDirectory() ? dirSize(t.abs) : stat.size;
       fs.rmSync(t.abs, { recursive: true, force: false });
@@ -370,16 +391,59 @@ router.post('/delete', (req, res) => {
       audit({ userId: req.user.id, username: req.user.username, action: 'delete', detail: `${relDisplay(t.root, t.abs)} (${size} bytes)`, ip: req.ip });
       results.push({ path: rel, ok: true });
     } catch (err) {
-      results.push({ path: String(rel).slice(0, 200), ok: false, error: err.code === 'ENOENT' ? 'Not found' : (err.message || 'Delete failed') });
+      results.push({ path: String(rel).slice(0, 200), ok: false, error: err.code === 'ENOENT' ? 'Not found' : (err.message || 'Delete failed'), ...(err.locked ? { locked: err.locked } : {}) });
     }
   }
   if (freed > 0) addUsedBytes(req.user.id, -freed);
   res.json({ results });
 });
 
-// Error handler local to file routes: surface PathError messages, hide the rest.
+// ---- Locked folders (see src/util/locks.js) ----
+
+const wrap = (fn) => (req, res, next) => Promise.resolve().then(() => fn(req, res)).catch(next);
+const body = (req) => req.body || {};
+
+// The folder a lock request is about, in the user's own storage.
+function lockTarget(req, { mustExist = false } = {}) {
+  const t = resolveTarget(req, body(req).path, { lockCheck: false });
+  if (t.readOnly) throw new PathError('Repos are never locked');
+  if (mustExist) {
+    let stat;
+    try { stat = fs.statSync(t.abs); } catch { stat = null; }
+    if (!stat || !stat.isDirectory()) throw new PathError('Folder not found');
+  }
+  return t;
+}
+
+// POST /api/files/lock {path, password}: put a password on a folder
+router.post('/lock', wrap((req, res) => {
+  const t = lockTarget(req, { mustExist: true });
+  res.json({ ok: true, ...locks.createLock(req, t.rel, body(req).password) });
+}));
+
+// POST /api/files/unlock {path, password}: open a locked folder for this session
+router.post('/unlock', wrap(async (req, res) => {
+  const t = lockTarget(req);
+  res.json({ ok: true, ...(await locks.unlock(req, t.rel, body(req).password)) });
+}));
+
+// POST /api/files/relock {path}: close it again now
+router.post('/relock', wrap((req, res) => {
+  const t = lockTarget(req);
+  res.json({ ok: true, ...locks.relock(req, t.rel) });
+}));
+
+// POST /api/files/unlock-remove {path, password}: take the password off
+router.post('/unlock-remove', wrap(async (req, res) => {
+  const t = lockTarget(req);
+  res.json({ ok: true, ...(await locks.removeLock(req, t.rel, body(req).password)) });
+}));
+
+// Error handler local to file routes: surface PathError and lock messages, hide the rest.
 router.use((err, req, res, next) => {
   if (err instanceof PathError) return res.status(err.status).json({ error: err.message });
+  if (err instanceof locks.LockedError) return res.status(423).json({ error: err.message, locked: err.locked });
+  if (err instanceof locks.LockRequestError) return res.status(err.status).json({ error: err.message });
   next(err);
 });
 

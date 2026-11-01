@@ -325,6 +325,32 @@ The tunnel carries HTTP only, so SFTP does not go through it. Pick one:
   gets translated progress lines; the verbatim output goes to
   `DATA_DIR/logs/git.log`.
 
+## Locked folders
+
+Any folder in your files can get its own password (⋯ menu → **Lock with
+password…**), on top of your sign-in.
+
+- Anything inside (listing, preview, download, zip, search, recent uploads,
+  upload, rename, delete) needs the folder opened with its password first. An
+  opened folder stays open for that browser session until 15 minutes pass
+  without using it, until **Lock now**, or until you sign out.
+- 10 wrong folder passwords in 15 minutes block further tries for 15 minutes.
+  Every open, wrong password, lock and removal is in the audit log.
+- Over SFTP, locked folders are hidden and refused (SFTP can't ask for a second
+  password). A folder that holds a locked folder can't be renamed over SFTP.
+- The lock belongs to the folder's path. Deleting a locked folder keeps the
+  lock, so a backup or sync that puts it back finds it locked. For the same
+  reason a locked folder (or one holding one) can't be renamed: remove the lock
+  first.
+- The files themselves are not encrypted: anyone with access to the disk or
+  NAS share can still read them. The lock protects the web app and SFTP.
+- **Forgot a folder password?** On the server, in the Strongroom folder:
+
+  ```
+  node scripts/folder-locks.js list
+  node scripts/folder-locks.js remove <username> /folder/path
+  ```
+
 ## Notes
 
 - Deleting a user removes the account and its sessions but leaves their files

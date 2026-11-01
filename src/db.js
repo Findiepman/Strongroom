@@ -52,6 +52,25 @@ CREATE TABLE IF NOT EXISTS files (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_files_user ON files(user_id);
+
+-- Folders with their own password (see src/util/locks.js). relpath is the
+-- folder's path in the user's storage, like "/programeren".
+CREATE TABLE IF NOT EXISTS folder_locks (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  relpath       TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  created_at    INTEGER NOT NULL,
+  UNIQUE (user_id, relpath)
+);
+
+-- Which sign-in session has opened which locked folder, until when.
+CREATE TABLE IF NOT EXISTS folder_unlocks (
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  lock_id    INTEGER NOT NULL REFERENCES folder_locks(id) ON DELETE CASCADE,
+  expires_at INTEGER NOT NULL,
+  PRIMARY KEY (session_id, lock_id)
+);
 `);
 
 function seedAdmin() {

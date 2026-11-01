@@ -152,6 +152,27 @@
   </div>
 </dialog>
 
+<dialog id="lock-dialog">
+  <h2 id="lock-title">Locked folder</h2>
+  <p class="sub" id="lock-sub"></p>
+  <form method="dialog">
+    <input type="text" id="lock-user" autocomplete="username" hidden>
+    <div class="field">
+      <label for="lock-pw" id="lock-pw-label">Folder password</label>
+      <input type="password" id="lock-pw" autocomplete="current-password" spellcheck="false">
+    </div>
+    <div class="field" id="lock-pw2-field" hidden>
+      <label for="lock-pw2">Type it again</label>
+      <input type="password" id="lock-pw2" autocomplete="new-password" spellcheck="false">
+    </div>
+    <p class="error-line" id="lock-error"></p>
+    <div class="dialog-actions">
+      <button class="btn ghost" value="cancel">Cancel</button>
+      <button class="btn pri" value="default" id="lock-go">Open</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="preview-dialog" class="preview">
   <div class="preview-h">
     <div class="meta"><b id="preview-title"></b><small id="preview-sub"></small></div>

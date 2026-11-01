@@ -22,6 +22,8 @@ const state = {
   search: null,       // {q, truncated} while showing search results
   overview: null,
   loading: false,
+  loaded: false,      // a folder has been shown at least once
+  lockedBy: [],       // locked folders the current folder is in (all open)
 };
 
 const $ = (id) => document.getElementById(id);
@@ -48,21 +50,32 @@ async function load(path, { keepSearch = false } = {}) {
   if (!keepSearch && state.search) { state.search = null; Shell.setSearch(''); }
   state.loading = true;
   if (!state.items.length) renderSkeleton();
+  let lockedAt = null;
   await withBusy(async () => {
     try {
       const data = await API.call(fileUrl('list', path));
       state.path = data.path;
       state.readOnly = !!data.readOnly;
+      state.lockedBy = data.lockedBy || [];
+      state.loaded = true;
       state.items = data.entries.map((e) => ({ ...e, path: joinPath(data.path, e.name) }));
       Shell.updateGauge(data.usedBytes, data.quotaBytes);
       const url = state.path === '/' ? '/files' : '/files?path=' + encodeURIComponent(state.path);
       history.replaceState(null, '', url);
     } catch (err) {
+      if (err.status === 423 && err.locked) { lockedAt = err.locked; return; }
       toast(err.message, true);
       if (path !== '/') { state.loading = false; return load('/'); }
     }
   });
   state.loading = false;
+  if (lockedAt) {
+    // A locked folder on the way: ask for its password, then try again.
+    if (await askLock('open', lockedAt)) return load(path, { keepSearch });
+    if (!state.loaded) return load(parentPath(lockedAt));
+    render();
+    return;
+  }
   state.selected.clear();
   render();
   if (state.path === '/' && !state.search) loadOverview();
@@ -331,6 +344,12 @@ function renderCrumb() {
     else crumb.append(el('span', { class: 'here' }, part));
   });
   if (state.readOnly) crumb.append(el('span', { class: 'badge ro-badge' }, icon('lock', 'sm'), 'read-only'));
+  if (state.lockedBy.length) {
+    crumb.append(el('button', {
+      class: 'badge ro-badge lock-badge', title: 'Opened with its password. Locks again after 15 minutes of not using it.',
+      onclick: () => lockNow(state.lockedBy),
+    }, icon('lock', 'sm'), 'Locked folder · Lock now'));
+  }
 }
 
 function renderToolbar() {
@@ -351,7 +370,7 @@ function renderToolbar() {
 function subLine(item) {
   if (state.search) return parentPath(item.path) === '/' ? 'Home' : parentPath(item.path);
   if (item.repo) return 'Pulled repositories · read-only';
-  if (item.dir) return 'Folder';
+  if (item.dir) return item.lock ? fileKind(item).kind : 'Folder';
   return fileKind(item).kind;
 }
 
@@ -415,11 +434,18 @@ function itemMenu(item, anchor) {
   const items = [];
   if (item.dir) {
     items.push(menuItem('folder', 'Open', () => load(item.path)));
-    items.push(menuItem('zip', 'Download as zip', () => navDownload(fileUrl('download-zip', item.path))));
+    items.push(menuItem('zip', 'Download as zip', () => guardedDownload('download-zip', item.path)));
     if (!item.repo) items.push(menuItem('star', isPinned(item.path) ? 'Unpin from home' : 'Pin to home', () => togglePin(item.path)));
+    if (canSelect(item)) {
+      if (!item.lock) items.push(menuItem('lock', 'Lock with password…', () => lockFolder(item.path)));
+      else {
+        if (item.lock.open) items.push(menuItem('lock', 'Lock now', () => lockNow([item.path])));
+        items.push(menuItem('key', 'Remove lock…', () => removeLock(item.path)));
+      }
+    }
   } else {
     if (isPreviewable(item)) items.push(menuItem('eye', 'Preview', () => openPreview(item)));
-    items.push(menuItem('download', 'Download', () => navDownload(fileUrl('download', item.path))));
+    items.push(menuItem('download', 'Download', () => guardedDownload('download', item.path)));
   }
   if (state.search) items.push(menuItem('folder', 'Show in folder', () => load(parentPath(item.path))));
   if (canSelect(item)) {
@@ -433,7 +459,23 @@ function itemMenu(item, anchor) {
 function openItem(item) {
   if (item.dir) load(item.path);
   else if (isPreviewable(item)) openPreview(item);
-  else navDownload(fileUrl('download', item.path));
+  else guardedDownload('download', item.path);
+}
+
+// Downloads are plain navigations, so a refusal would land as a JSON file.
+// Ask the server first (check=1) and get the folder password if it's needed.
+async function guardedDownload(kind, p) {
+  try {
+    await API.call(fileUrl(kind, p) + '&check=1');
+  } catch (err) {
+    if (err.status === 423 && err.locked) {
+      if (await askLock('open', err.locked)) return guardedDownload(kind, p);
+      return;
+    }
+    toast(err.message, true);
+    return;
+  }
+  navDownload(fileUrl(kind, p));
 }
 
 function navDownload(url) {
@@ -479,7 +521,7 @@ $('sel-delete').addEventListener('click', () => openDelete([...state.selected]))
 $('sel-download').addEventListener('click', () => {
   const chosen = state.items.filter((i) => state.selected.has(i.path));
   chosen.forEach((item, i) => setTimeout(() => {
-    navDownload(fileUrl(item.dir ? 'download-zip' : 'download', item.path));
+    guardedDownload(item.dir ? 'download-zip' : 'download', item.path);
   }, i * 400));
   if (chosen.length > 3) toast('Your browser may ask to allow multiple downloads.');
 });
@@ -789,6 +831,14 @@ $('delete-confirm').addEventListener('click', async () => {
 const previewDialog = $('preview-dialog');
 let previewItem = null;
 async function openPreview(item) {
+  // The folder may have locked itself again since it was opened.
+  try {
+    await API.call(fileUrl('download', item.path) + '&check=1');
+  } catch (err) {
+    if (err.status === 423 && err.locked && await askLock('open', err.locked)) return openPreview(item);
+    if (err.status !== 423) toast(err.message, true);
+    return;
+  }
   previewItem = item;
   $('preview-title').textContent = item.name;
   $('preview-sub').textContent = [fileKind(item).kind, item.size != null ? fmtBytes(item.size) : '', parentPath(item.path)].filter(Boolean).join(' · ');
@@ -817,8 +867,112 @@ async function openPreview(item) {
   }
 }
 $('preview-close').addEventListener('click', () => previewDialog.close());
-$('preview-download').addEventListener('click', () => navDownload(fileUrl('download', previewItem.path)));
+$('preview-download').addEventListener('click', () => guardedDownload('download', previewItem.path));
 previewDialog.addEventListener('click', (e) => { if (e.target === previewDialog) previewDialog.close(); });
+
+/* ---------- Locked folders ---------- */
+
+const lockDialog = $('lock-dialog');
+let lockJob = null; // {mode, path, done(ok)}
+
+const LOCK_TEXT = {
+  open: {
+    title: (n) => `Open ${n}`,
+    sub: 'This folder is locked. It stays open for 15 minutes after you last use it, or until you lock it or sign out.',
+    label: 'Folder password', go: 'Open', autocomplete: 'current-password',
+  },
+  create: {
+    title: (n) => `Lock ${n}`,
+    sub: 'Everything inside will need this password, on top of your sign-in. It locks again after 15 minutes of not using it. '
+      + 'Locked folders are hidden over SFTP. If you forget the password, it can only be removed on the server.',
+    label: 'New folder password', go: 'Lock folder', autocomplete: 'new-password',
+  },
+  remove: {
+    title: (n) => `Remove the lock from ${n}`,
+    sub: 'Type the folder password. After this, your sign-in alone opens everything inside again.',
+    label: 'Folder password', go: 'Remove lock', autocomplete: 'current-password',
+  },
+};
+
+// Shows the password dialog. Resolves true once the server said yes, false if cancelled.
+function askLock(mode, p) {
+  if (lockJob) lockJob.done(false);
+  const t = LOCK_TEXT[mode];
+  const name = p.split('/').pop() || 'Home';
+  $('lock-title').textContent = t.title(name);
+  $('lock-sub').textContent = t.sub;
+  $('lock-pw-label').textContent = t.label;
+  $('lock-go').textContent = t.go;
+  $('lock-pw').value = '';
+  $('lock-pw2').value = '';
+  $('lock-pw').setAttribute('autocomplete', t.autocomplete);
+  $('lock-pw2-field').hidden = mode !== 'create';
+  $('lock-user').value = 'folder:' + p; // lets a password manager keep one entry per folder
+  $('lock-error').textContent = '';
+  return new Promise((resolve) => {
+    lockJob = { mode, path: p, done: (ok) => { lockJob = null; resolve(ok); } };
+    lockDialog.showModal();
+    $('lock-pw').focus();
+  });
+}
+
+lockDialog.querySelector('form').addEventListener('submit', async (e) => {
+  if (e.submitter && e.submitter.value === 'cancel') return; // the close event resolves it
+  e.preventDefault();
+  if (!lockJob) return lockDialog.close();
+  const { mode, path: p } = lockJob;
+  const password = $('lock-pw').value;
+  if (mode === 'create' && password !== $('lock-pw2').value) {
+    $('lock-error').textContent = 'The two passwords are not the same';
+    return;
+  }
+  const url = { open: '/api/files/unlock', create: '/api/files/lock', remove: '/api/files/unlock-remove' }[mode];
+  try {
+    await withBusy(() => API.call(url, { method: 'POST', body: { path: p, password } }));
+  } catch (err) {
+    $('lock-error').textContent = err.message;
+    $('lock-pw').select();
+    return;
+  }
+  const job = lockJob;
+  lockJob = null;
+  lockDialog.close();
+  job.done(true);
+});
+lockDialog.addEventListener('close', () => { if (lockJob) lockJob.done(false); });
+
+async function lockFolder(p) {
+  if (!(await askLock('create', p))) return;
+  toast(`Locked ${p.split('/').pop()}. It's open for you now; it locks again after 15 minutes of not using it.`);
+  await load(state.path, { keepSearch: true });
+}
+
+async function removeLock(p) {
+  if (!(await askLock('remove', p))) return;
+  toast(`Removed the lock from ${p.split('/').pop()}`);
+  await load(state.path, { keepSearch: true });
+}
+
+// Close locked folders for this session now. If you're inside one, go to just outside it.
+async function lockNow(paths) {
+  try {
+    for (const p of paths) await API.call('/api/files/relock', { method: 'POST', body: { path: p } });
+  } catch (err) {
+    toast(err.message, true);
+    return;
+  }
+  toast(paths.length === 1 ? `Locked ${paths[0].split('/').pop()}` : 'Locked');
+  const outer = state.lockedBy.length ? state.lockedBy[0] : null;
+  if (outer && paths.some((p) => state.path === p || state.path.startsWith(p + '/'))) await load(parentPath(outer));
+  else await load(state.path);
+}
+
+// Enter in a dialog submits with the form's first button, which is Cancel in
+// these dialogs. Make Cancel a plain button, so Enter does the real action.
+document.querySelectorAll('dialog form button[value="cancel"]').forEach((b) => {
+  b.type = 'button';
+  b.addEventListener('click', () => b.closest('dialog').close());
+});
 
 /* ---------- Init ---------- */
 

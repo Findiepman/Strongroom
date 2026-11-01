@@ -279,6 +279,9 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .crumb .here { color: var(--tx); padding: 3px 8px; font-weight: 600; }
 .crumb .ic { color: var(--faint); }
 .crumb .ro-badge { margin-left: 8px; }
+.crumb button.lock-badge { border: 0; font: inherit; font-size: 12px; cursor: pointer; background: var(--ac-dim); color: var(--ac); }
+.crumb button.lock-badge .ic { color: currentColor; }
+.crumb button.lock-badge:hover { filter: brightness(1.15); }
 
 .chips { display: flex; gap: 6px; flex-wrap: wrap; }
 .chip {

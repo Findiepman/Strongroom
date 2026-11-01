@@ -7,6 +7,7 @@ const config = require('../config');
 const { db, audit, deleteUserSessions, setUsedBytes } = require('../db');
 const { requireAuth, csrfProtect } = require('../middleware/auth');
 const { dirSize } = require('../util/paths');
+const locks = require('../util/locks');
 
 const router = express.Router();
 router.use(requireAuth, csrfProtect);
@@ -74,7 +75,9 @@ router.get('/overview', (req, res) => {
   const used = breakdown.reduce((n, b) => n + b.bytes, looseBytes);
   setUsedBytes(req.user.id, used);
 
-  // Recent uploads that still exist where they were put.
+  // Recent uploads that still exist where they were put, leaving out what's in
+  // a locked folder this session hasn't opened.
+  const lv = locks.view(req);
   const recent = [];
   const seen = new Set();
   const rows = db.prepare(
@@ -83,6 +86,7 @@ router.get('/overview', (req, res) => {
   for (const r of rows) {
     if (recent.length >= 8 || seen.has(r.relpath)) continue;
     seen.add(r.relpath);
+    if (lv.blocking(r.relpath)) continue;
     try {
       const st = fs.statSync(path.join(root, ...r.relpath.split('/').filter(Boolean)));
       if (!st.isFile()) continue;
@@ -94,7 +98,13 @@ router.get('/overview', (req, res) => {
   const activity = db.prepare(
     `SELECT id, username, action, detail, created_at FROM audit_logs
      ${isAdmin ? '' : 'WHERE user_id = ?'} ORDER BY created_at DESC, id DESC LIMIT 200`
-  ).all(...(isAdmin ? [] : [req.user.id]));
+  ).all(...(isAdmin ? [] : [req.user.id]))
+    // Your own events about files in a closed locked folder (their names) stay hidden too.
+    .filter((r) => {
+      if (r.username !== req.user.username || !lv.locks.length || r.action.startsWith('folder.')) return true;
+      const m = String(r.detail || '').match(/^(\/[^\n]*?)(?: \(\d+ bytes\)| \(folder\)| -> .*|: .*)?$/);
+      return !(m && lv.blocking(m[1].replace(/\/$/, '') || '/'));
+    });
 
   res.json({
     usedBytes: used,

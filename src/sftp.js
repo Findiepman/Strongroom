@@ -10,6 +10,7 @@ const { db, audit, getUserByUsername, getUserById, addUsedBytes } = require('./d
 const { validateName } = require('./util/paths');
 const { validateUpload } = require('./util/filetype');
 const { assertNotReserved, moveIntoPlace } = require('./util/storage');
+const locks = require('./util/locks');
 
 const DUMMY_HASH = bcrypt.hashSync('not-a-real-password', config.BCRYPT_COST);
 
@@ -58,7 +59,9 @@ const isReservedTop = (name) => String(name).toLowerCase() === 'repos';
 // climb above "/", which is the jail root. "/repos" (the web app's read-only
 // mount of the GitHub puller's sandbox) is not part of SFTP at all: any path
 // through a top-level "repos" is refused, so a sync tool can never touch it.
-function resolveVirtual(jail, virtualPath) {
+// Locked folders (their paths in lockedPaths) are refused the same way: SFTP
+// can't ask for a folder password, so they're web-only.
+function resolveVirtual(jail, virtualPath, lockedPaths = []) {
   const norm = path.posix.normalize('/' + String(virtualPath || '').replace(/\\/g, '/'));
   const parts = [];
   for (const p of norm.split('/')) {
@@ -70,7 +73,11 @@ function resolveVirtual(jail, virtualPath) {
   if (parts.length && isReservedTop(parts[0])) throw denied('/repos is not available over SFTP');
   const abs = path.join(jail, ...parts);
   if (abs !== jail && !abs.startsWith(jail + path.sep)) throw denied('escape');
-  return { abs, virtual: '/' + parts.join('/') };
+  const virtual = '/' + parts.join('/');
+  if (lockedPaths.some((l) => virtual === l || virtual.startsWith(l + '/'))) {
+    throw denied('This folder is locked. Open it in the web app.');
+  }
+  return { abs, virtual };
 }
 
 // The web app's naming rules for anything new (file, folder, rename target).
@@ -161,6 +168,10 @@ function startSftpServer() {
     });
 
     const log = (action, detail) => audit({ userId: user.id, username: user.username, action, detail, ip });
+    // Looked up on every request, so a folder locked in the web app is closed
+    // to an SFTP connection that's already open.
+    const lockedPaths = () => locks.locksOf(user.id).map((l) => l.relpath);
+    const resolveHere = (given) => resolveVirtual(jail, given, lockedPaths());
 
     client.on('ready', () => {
       client.on('session', (acceptSession) => {
@@ -213,7 +224,7 @@ function startSftpServer() {
 
           on('REALPATH', (reqid, given) => {
             try {
-              const { abs, virtual } = resolveVirtual(jail, given);
+              const { abs, virtual } = resolveHere(given);
               let stat;
               try { stat = fs.statSync(abs); } catch { stat = null; }
               sftp.name(reqid, [{
@@ -226,14 +237,14 @@ function startSftpServer() {
 
           on('STAT', (reqid, given) => {
             try {
-              const { abs } = resolveVirtual(jail, given);
+              const { abs } = resolveHere(given);
               fs.stat(abs, (err, stat) => (err ? fail(reqid, err) : sftp.attrs(reqid, toAttrs(stat))));
             } catch (err) { fail(reqid, err); }
           });
 
           on('LSTAT', (reqid, given) => {
             try {
-              const { abs } = resolveVirtual(jail, given);
+              const { abs } = resolveHere(given);
               fs.lstat(abs, (err, stat) => (err ? fail(reqid, err) : sftp.attrs(reqid, toAttrs(stat))));
             } catch (err) { fail(reqid, err); }
           });
@@ -246,7 +257,7 @@ function startSftpServer() {
 
           on('OPEN', (reqid, given, flags) => {
             try {
-              const { abs, virtual } = resolveVirtual(jail, given);
+              const { abs, virtual } = resolveHere(given);
               const writing = (flags & (OPEN_MODE.WRITE | OPEN_MODE.APPEND)) !== 0;
               if (!writing) {
                 fs.open(abs, 'r', (err, fd) => {
@@ -386,7 +397,7 @@ function startSftpServer() {
 
           on('OPENDIR', (reqid, given) => {
             try {
-              const { abs } = resolveVirtual(jail, given);
+              const { abs } = resolveHere(given);
               fs.stat(abs, (err, stat) => {
                 if (err) return fail(reqid, err);
                 if (!stat.isDirectory()) return sftp.status(reqid, STATUS_CODE.FAILURE);
@@ -402,9 +413,14 @@ function startSftpServer() {
             // client's packet limit (about 256 KB for OpenSSH and rclone).
             const sendPage = () => {
               const names = [];
+              const hidden = lockedPaths();
               while (h.pos < h.entries.length && names.length < READDIR_PAGE) {
                 const e = h.entries[h.pos++];
                 if (h.path === jail && isReservedTop(e.name)) continue; // never list a stray top-level "repos"
+                if (hidden.length) {
+                  const v = '/' + path.relative(jail, path.join(h.path, e.name)).split(path.sep).join('/');
+                  if (hidden.includes(v)) continue; // locked folders are web-only
+                }
                 try {
                   const stat = fs.statSync(path.join(h.path, e.name));
                   names.push({ filename: e.name, longname: longname(e.name, stat, user.username), attrs: toAttrs(stat) });
@@ -424,7 +440,7 @@ function startSftpServer() {
 
           on('MKDIR', (reqid, given) => {
             try {
-              const { abs, virtual } = resolveVirtual(jail, given);
+              const { abs, virtual } = resolveHere(given);
               if (abs === jail) throw failure('Already exists');
               checkNewName(abs, jail);
               fs.mkdir(abs, (err) => {
@@ -436,7 +452,7 @@ function startSftpServer() {
 
           on('RMDIR', (reqid, given) => {
             try {
-              const { abs, virtual } = resolveVirtual(jail, given);
+              const { abs, virtual } = resolveHere(given);
               if (abs === jail) throw denied('Cannot delete the root folder');
               fs.rmdir(abs, (err) => {
                 if (!err) {
@@ -450,7 +466,7 @@ function startSftpServer() {
 
           on('REMOVE', (reqid, given) => {
             try {
-              const { abs, virtual } = resolveVirtual(jail, given);
+              const { abs, virtual } = resolveHere(given);
               if (recentlyRefused(virtual)) {
                 throw failure('Not deleted: the last upload of this file was refused, so the stored copy is kept');
               }
@@ -466,9 +482,12 @@ function startSftpServer() {
 
           on('RENAME', (reqid, fromGiven, toGiven) => {
             try {
-              const from = resolveVirtual(jail, fromGiven);
-              const to = resolveVirtual(jail, toGiven);
+              const from = resolveHere(fromGiven);
+              const to = resolveHere(toGiven);
               if (from.abs === jail || to.abs === jail) throw denied('Cannot rename the root folder');
+              if (locks.inside(locks.locksOf(user.id), from.virtual).length) {
+                throw denied('This folder holds a locked folder, so it can\'t be renamed over SFTP');
+              }
               const st = fs.statSync(from.abs);
               const newName = checkNewName(to.abs, jail);
               // Replacing an existing file is allowed (POSIX rename): sync tools
@@ -507,7 +526,7 @@ function startSftpServer() {
           // times; other attributes are accepted and ignored.
           on('SETSTAT', (reqid, given, attrs) => {
             try {
-              const { abs } = resolveVirtual(jail, given);
+              const { abs } = resolveHere(given);
               const t = timesFrom(attrs);
               if (!t) { fs.statSync(abs); return sftp.status(reqid, STATUS_CODE.OK); }
               fs.utimes(abs, t.atime, t.mtime, (err) => fail(reqid, err));

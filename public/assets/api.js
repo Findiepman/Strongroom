@@ -22,6 +22,7 @@ const API = {
     if (!res.ok) {
       const err = new Error((data && data.error) || `Request failed (${res.status})`);
       err.status = res.status;
+      if (data && data.locked) err.locked = data.locked; // 423: the locked folder in the way
       throw err;
     }
     return data;
@@ -156,6 +157,7 @@ const CODE_EXT = /\.(js|mjs|cjs|ts|tsx|jsx|py|rb|go|rs|java|c|h|cpp|cs|php|sh|ps
 // -> {kind, icon, hue, filter}  filter is the chip group: images | docs | archives | other
 function fileKind(entry) {
   if (entry.repo) return { kind: 'Repository mount', icon: 'branch', hue: 'var(--t-text)', filter: 'folders' };
+  if (entry.dir && entry.lock) return { kind: entry.lock.open ? 'Locked folder · open' : 'Locked folder', icon: 'lock', hue: 'var(--t-folder)', filter: 'folders' };
   if (entry.dir) return { kind: 'Folder', icon: 'folder', hue: 'var(--t-folder)', filter: 'folders' };
   const m = entry.mime || '';
   const n = entry.name || '';
@@ -272,6 +274,10 @@ const VERBS = {
   'user.force_logout': ['signed out everywhere:', 'k-admin', 'logout'],
   'quota.set': ['changed quota:', 'k-admin', 'settings'],
   'role.set': ['changed role:', 'k-admin', 'settings'],
+  'folder.lock': ['locked folder', 'k-auth', 'lock'],
+  'folder.unlock': ['opened locked folder', 'k-auth', 'lock'],
+  'folder.unlock.fail': ['entered a wrong folder password for', 'k-fail', 'lock'],
+  'folder.unlock.remove': ['removed the lock from', 'k-auth', 'lock'],
 };
 
 // -> {text, sub, cls, icon, items?}

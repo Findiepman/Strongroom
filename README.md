@@ -12,7 +12,10 @@ jailed SFTP, and a GitHub puller — all behind one account system.
 - **Accounts** — admin/user roles, per-user storage quotas, audit log
   (logins, uploads, downloads, deletions), force-logout, self-service password
   change.
-- **SFTP** — same credentials, every user jailed to their own directory.
+- **SFTP** — same credentials and the same folder as the web app
+  (`STORAGE_ROOT/<user>`), with the same upload checks, quota, uploads list
+  and audit log. Keeps file times, so it works as a two-way sync target for
+  Windows Explorer via rclone bisync (see `docs/rclone-bisync-windows.md`).
 - **GitHub puller** — paste a public repo URL, the server clones or
   fast-forwards it into a sandboxed directory with a live (sanitized) log.
 
@@ -56,7 +59,7 @@ runs entirely out of `./data/` and generates its own dev JWT secret.
 | `SESSION_TTL_HOURS` | `12` | Server-side session lifetime |
 | `COOKIE_SECURE` | `true` | Keep `true`. Browsers accept Secure cookies on `http://localhost` for dev |
 | `STORAGE_ROOT` | `./data/storage` | Web file storage; one subfolder per user |
-| `SFTP_ROOT` | `./data/sftp` | SFTP jails; users land in `<SFTP_ROOT>/<username>/` |
+| `SFTP_ROOT` | `./data/sftp` | No longer used. SFTP now serves `STORAGE_ROOT/<username>/`, the web app's folder (see "Upgrading: SFTP now shares web storage") |
 | `REPOS_ROOT` | `./data/repos` | Where pulled GitHub repos live |
 | `DATA_DIR` | `./data` | SQLite DB, SSH host key, temp uploads, logs |
 | `TMP_DIR` | `DATA_DIR/tmp` | Upload staging. Keep it on the same disk as `STORAGE_ROOT` (see the NAS section) |
@@ -91,7 +94,7 @@ echo 'UUID=<uuid-here>  /srv/web  ext4  defaults,noatime  0 2' | sudo tee -a /et
 sudo systemctl daemon-reload && sudo mount -a   # verify fstab is valid
 
 # 4. Create the directory layout and hand it to the service user
-sudo mkdir -p /srv/web/{storage,sftp,repos,data}
+sudo mkdir -p /srv/web/{storage,repos,data}
 sudo useradd --system --home /srv/web --shell /usr/sbin/nologin strongroom
 sudo chown -R strongroom:strongroom /srv/web
 sudo chmod 750 /srv/web
@@ -101,7 +104,6 @@ Then in `.env`:
 
 ```
 STORAGE_ROOT=/srv/web/storage
-SFTP_ROOT=/srv/web/sftp
 REPOS_ROOT=/srv/web/repos
 DATA_DIR=/srv/web/data
 NODE_ENV=production
@@ -129,14 +131,13 @@ sudo apt install nfs-common
 sudo mkdir -p /srv/nas
 echo '<nas-ip>:/volume1/strongroom  /srv/nas  nfs4  rw,hard,noatime,_netdev  0 0' | sudo tee -a /etc/fstab
 sudo systemctl daemon-reload && sudo mount /srv/nas
-sudo mkdir -p /srv/nas/{storage,sftp,repos,tmp}
+sudo mkdir -p /srv/nas/{storage,repos,tmp}
 ```
 
 `.env`:
 
 ```
 STORAGE_ROOT=/srv/nas/storage
-SFTP_ROOT=/srv/nas/sftp
 REPOS_ROOT=/srv/nas/repos
 TMP_DIR=/srv/nas/tmp       # same disk as storage, so uploads land atomically
 DATA_DIR=/home/<you>/strongroom-data   # stays local
@@ -153,7 +154,7 @@ RequiresMountsFor=/srv/nas
 
 Move existing files over with the service stopped:
 `sudo rsync -a --info=progress2 <old STORAGE_ROOT>/ /srv/nas/storage/` (same
-for sftp and repos), update `.env`, then start strongroom again.
+for repos), update `.env`, then start strongroom again.
 
 ## Running as a service (systemd)
 
@@ -328,8 +329,33 @@ The tunnel carries HTTP only, so SFTP does not go through it. Pick one:
 
 - Deleting a user removes the account and its sessions but leaves their files
   on disk (deliberate: a mistaken click loses no data). Clean up
-  `STORAGE_ROOT/<name>` and `SFTP_ROOT/<name>` manually.
-- SFTP quotas are not enforced (the SFTP tree is separate from web storage);
-  the web quota is recomputed from disk at login and on the Settings page.
+  `STORAGE_ROOT/<name>` manually.
+- SFTP and the web app share one folder per user, so the quota covers both.
+  SFTP uploads are staged in `TMP_DIR` and only land on a good close, after
+  the same content check as web uploads; a refused file comes back to the
+  client as a failure with the reason (e.g. "Executable files are not
+  allowed") and is logged as `upload.blocked`. SFTP upload, rename, mkdir and
+  delete are audited (`sftp.upload`, `sftp.rename`, `sftp.mkdir`,
+  `sftp.delete`) and keep the uploads list in step. `/repos` is not part of
+  SFTP at all. The quota is also recomputed from disk at login and on the
+  Settings page.
+
+## Tests
+
+`npm test` runs the test suite (Node's built-in runner). The SFTP tests start a
+real SFTP server on a random local port against a throw-away temp folder, so
+they never touch your data or a running strongroom.
+
+## Upgrading: SFTP now shares web storage
+
+Older versions kept SFTP files in a separate tree, `SFTP_ROOT/<user>`. SFTP
+now serves `STORAGE_ROOT/<user>` instead, so anything still in the old tree
+is no longer visible over SFTP. To keep it, stop strongroom and move it into
+the web folder by hand, checking for name clashes first, e.g.
+`sudo rsync -a --ignore-existing <SFTP_ROOT>/<user>/ <STORAGE_ROOT>/<user>/`,
+then start strongroom again (the quota is recomputed at the next login).
+Nothing is moved or deleted automatically. A top-level `repos` folder in the
+old tree would not be reachable afterwards (the name is reserved), so rename
+it first.
 - The SSH host key is generated on first run at `DATA_DIR/ssh_host_rsa_key`.
   Clients will ask to trust it on first connect.

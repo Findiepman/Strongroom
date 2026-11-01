@@ -152,7 +152,7 @@ $('create-form').addEventListener('submit', async (e) => {
 const FILTERS = [
   { id: 'all', label: 'All', actions: '' },
   { id: 'auth', label: 'Sign-ins', icon: 'lock', actions: 'login.success,login.fail,logout,sftp.login,sftp.login.fail' },
-  { id: 'files', label: 'Files', icon: 'folder', actions: 'upload,sftp.upload,download,download.zip,mkdir,rename,repo.pull' },
+  { id: 'files', label: 'Files', icon: 'folder', actions: 'upload,sftp.upload,download,download.zip,mkdir,sftp.mkdir,rename,sftp.rename,repo.pull' },
   { id: 'deletes', label: 'Deletes', icon: 'trash', actions: 'delete,sftp.delete' },
   { id: 'admin', label: 'Admin', icon: 'shield', actions: 'user.create,user.delete,user.force_logout,quota.set,role.set,password.change' },
   { id: 'problems', label: 'Problems', icon: 'x', actions: 'login.fail,sftp.login.fail,upload.blocked,password.fail' },

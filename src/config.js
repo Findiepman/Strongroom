@@ -25,6 +25,8 @@ const config = {
   HOST: process.env.HOST || '0.0.0.0',
 
   STORAGE_ROOT: path.resolve(process.env.STORAGE_ROOT || path.join(DATA_DIR, 'storage')),
+  // Old separate SFTP tree. No longer used: SFTP now serves STORAGE_ROOT/<user>,
+  // the web app's own folder. Kept only so old .env files still load.
   SFTP_ROOT: path.resolve(process.env.SFTP_ROOT || path.join(DATA_DIR, 'sftp')),
   REPOS_ROOT: path.resolve(process.env.REPOS_ROOT || path.join(DATA_DIR, 'repos')),
   // Upload staging. Put it on the same disk as STORAGE_ROOT (e.g. the NAS
@@ -57,7 +59,7 @@ const config = {
   IS_PROD: process.env.NODE_ENV === 'production',
 };
 
-for (const dir of [config.DATA_DIR, config.STORAGE_ROOT, config.SFTP_ROOT, config.REPOS_ROOT, config.TMP_DIR, config.LOG_DIR]) {
+for (const dir of [config.DATA_DIR, config.STORAGE_ROOT, config.REPOS_ROOT, config.TMP_DIR, config.LOG_DIR]) {
   fs.mkdirSync(dir, { recursive: true });
 }
 

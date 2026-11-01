@@ -13,9 +13,10 @@ router.get('/info', requireAuth, (req, res) => {
     host,
     port: config.SFTP_PORT,
     username: req.user.username,
-    // Virtual path: every user lands in their own jail and cannot leave it.
+    // Virtual path: every user lands in their own storage folder (the same
+    // one the web app shows) and cannot leave it.
     root: '/',
-    serverPath: `${config.SFTP_ROOT.replace(/\\/g, '/')}/${req.user.username}/`,
+    serverPath: `${config.STORAGE_ROOT.replace(/\\/g, '/')}/${req.user.username}/`,
   });
 });
 

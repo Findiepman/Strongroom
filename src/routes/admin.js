@@ -47,7 +47,6 @@ router.post('/users', async (req, res, next) => {
       'INSERT INTO users (username, password_hash, role, quota_bytes, created_at) VALUES (?, ?, ?, ?, ?)'
     ).run(username, hash, role, quota, Date.now());
     fs.mkdirSync(path.join(config.STORAGE_ROOT, username), { recursive: true });
-    fs.mkdirSync(path.join(config.SFTP_ROOT, username), { recursive: true });
     audit({ userId: req.user.id, username: req.user.username, action: 'user.create', detail: `${username} (${role}, quota ${quota})`, ip: req.ip });
     res.status(201).json({ id: info.lastInsertRowid });
   } catch (err) {

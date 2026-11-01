@@ -104,6 +104,11 @@ app.get('/admin', pageAuth, (req, res) => {
 });
 
 app.use('/assets', express.static(path.join(PUBLIC_DIR, 'assets'), { maxAge: '1h' }));
+// Browsers ask for /favicon.ico on their own (downloads, bookmarks, PDFs).
+app.get('/favicon.ico', (req, res) => {
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.sendFile(path.join(ASSETS_DIR, 'favicon.ico'));
+});
 
 // --- Live preview of pulled repos ---
 // Serves a repo folder as a static site so frontend-only apps run straight

@@ -1,5 +1,6 @@
 'use strict';
 
+hydrateIcons();
 const form = document.getElementById('login-form');
 const errorLine = document.getElementById('login-error');
 const btn = document.getElementById('login-btn');

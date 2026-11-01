@@ -3,61 +3,61 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>strongroom / settings</title>
+<meta name="theme-color" content="#12100e">
+<title>Settings · Strongroom</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&family=Unbounded:wght@500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body>
-<div id="app">
-  <div class="panel">
-    <h2>Storage</h2>
-    <div class="gauge" style="max-width:420px">
-      <div class="gauge-nums" style="font-size:13px">
-        <span id="usage-label">…</span>
-        <span id="usage-pct"></span>
-      </div>
-      <div class="gauge-track" style="height:6px">
-        <div class="gauge-fill" id="usage-fill"></div>
-      </div>
+<main id="app">
+  <div class="page-head">
+    <div>
+      <h1 class="page-title">Settings</h1>
+      <p class="sub">Your account, storage and password.</p>
     </div>
-    <p class="sub" style="margin-top:12px">
-      Usage counts everything in your web storage folder. Ask an admin if you
-      need a bigger quota.
-    </p>
   </div>
 
-  <div class="panel" style="max-width:480px">
-    <h2>Change password</h2>
-    <form id="password-form">
-      <div class="field">
-        <label for="pw-current">Current password</label>
-        <input type="password" id="pw-current" autocomplete="current-password" required>
-      </div>
-      <div class="field">
-        <label for="pw-next">New password</label>
-        <input type="password" id="pw-next" autocomplete="new-password" required minlength="10">
-      </div>
-      <div class="field">
-        <label for="pw-repeat">New password again</label>
-        <input type="password" id="pw-repeat" autocomplete="new-password" required minlength="10">
-      </div>
-      <p class="error-line" id="pw-error"></p>
-      <p class="ok-line" id="pw-ok"></p>
-      <button class="btn primary" type="submit">Change password</button>
-      <p class="sub" style="margin-top:12px">
-        Changing your password signs you out on every other device and SFTP
-        keeps using the new password immediately.
-      </p>
-    </form>
-  </div>
+  <div class="two">
+    <div class="stack">
+      <section class="card">
+        <div class="card-h"><span class="eyebrow">Storage</span></div>
+        <div class="usage-big"><b id="usage-used">…</b><span id="usage-of"></span><span class="pct" id="usage-pct"></span></div>
+        <div class="meter"><i id="usage-fill"></i></div>
+        <p class="hint mt-sm">Counts everything in your web storage. Ask an admin if you need a bigger quota.</p>
+      </section>
 
-  <div class="panel">
-    <h2>Account</h2>
-    <dl class="kv" id="account-kv"></dl>
+      <section class="card">
+        <div class="card-h"><span class="eyebrow">Account</span></div>
+        <dl class="kv" id="account-kv"></dl>
+      </section>
+    </div>
+
+    <section class="card">
+      <div class="card-h"><span class="eyebrow">Change password</span></div>
+      <form id="password-form">
+        <div class="field">
+          <label for="pw-current">Current password</label>
+          <input type="password" id="pw-current" autocomplete="current-password" required>
+        </div>
+        <div class="field">
+          <label for="pw-next">New password</label>
+          <input type="password" id="pw-next" autocomplete="new-password" required minlength="10">
+          <p class="hint">At least 10 characters.</p>
+        </div>
+        <div class="field">
+          <label for="pw-repeat">New password again</label>
+          <input type="password" id="pw-repeat" autocomplete="new-password" required minlength="10">
+        </div>
+        <p class="error-line" id="pw-error"></p>
+        <p class="ok-line" id="pw-ok"></p>
+        <button class="btn pri" type="submit">Change password</button>
+        <p class="hint mt">This signs you out on every other device. SFTP uses the new password straight away.</p>
+      </form>
+    </section>
   </div>
-</div>
+</main>
 
 <script src="/assets/api.js"></script>
 <script src="/assets/shell.js"></script>

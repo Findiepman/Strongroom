@@ -3,8 +3,12 @@
 A self-hosted personal file server for a small trusted group. Web UI, per-user
 jailed SFTP, and a GitHub puller — all behind one account system.
 
-- **Web file browser** — upload (single/batch with progress), download, delete,
-  rename, folders, in-browser preview for images, PDFs and text.
+- **Home overview** — storage split per folder, pinned folders, recent uploads
+  and recent activity (bursts like a folder upload are grouped into one line).
+- **Web file browser** — upload (single/batch/folder with a progress tray),
+  download, delete, rename, folders, list or grid view with image thumbnails,
+  filters, sorting, search across all your folders, and in-browser preview
+  for images, PDFs and text.
 - **Accounts** — admin/user roles, per-user storage quotas, audit log
   (logins, uploads, downloads, deletions), force-logout, self-service password
   change.

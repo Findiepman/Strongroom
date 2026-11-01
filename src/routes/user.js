@@ -53,4 +53,58 @@ router.get('/usage', (req, res) => {
   res.json({ usedBytes: used, quotaBytes: req.user.quota_bytes });
 });
 
+// GET /api/user/overview — everything the home screen shows in one call:
+// storage split by top-level folder, recent uploads, and recent activity
+// (the user's own; admins see everyone's). Usage is recomputed from disk.
+router.get('/overview', (req, res) => {
+  const fs = require('fs');
+  const root = path.join(config.STORAGE_ROOT, req.user.username);
+  fs.mkdirSync(root, { recursive: true });
+
+  const breakdown = [];
+  let looseBytes = 0;
+  for (const e of fs.readdirSync(root, { withFileTypes: true })) {
+    const p = path.join(root, e.name);
+    try {
+      if (e.isDirectory()) breakdown.push({ name: e.name, bytes: dirSize(p) });
+      else if (e.isFile()) looseBytes += fs.statSync(p).size;
+    } catch { /* vanished mid-walk */ }
+  }
+  breakdown.sort((a, b) => b.bytes - a.bytes);
+  const used = breakdown.reduce((n, b) => n + b.bytes, looseBytes);
+  setUsedBytes(req.user.id, used);
+
+  // Recent uploads that still exist where they were put.
+  const recent = [];
+  const seen = new Set();
+  const rows = db.prepare(
+    'SELECT relpath, size, mime, created_at FROM files WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT 60'
+  ).all(req.user.id);
+  for (const r of rows) {
+    if (recent.length >= 8 || seen.has(r.relpath)) continue;
+    seen.add(r.relpath);
+    try {
+      const st = fs.statSync(path.join(root, ...r.relpath.split('/').filter(Boolean)));
+      if (!st.isFile()) continue;
+      recent.push({ path: r.relpath, name: r.relpath.split('/').pop(), size: st.size, mime: r.mime, created: r.created_at });
+    } catch { /* moved or deleted since */ }
+  }
+
+  const isAdmin = req.user.role === 'admin';
+  const activity = db.prepare(
+    `SELECT id, username, action, detail, created_at FROM audit_logs
+     ${isAdmin ? '' : 'WHERE user_id = ?'} ORDER BY created_at DESC, id DESC LIMIT 200`
+  ).all(...(isAdmin ? [] : [req.user.id]));
+
+  res.json({
+    usedBytes: used,
+    quotaBytes: req.user.quota_bytes,
+    breakdown,
+    looseBytes,
+    recent,
+    activity,
+    activityScope: isAdmin ? 'everyone' : 'you',
+  });
+});
+
 module.exports = router;

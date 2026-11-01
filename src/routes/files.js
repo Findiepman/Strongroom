@@ -96,6 +96,44 @@ router.get('/list', (req, res) => {
   });
 });
 
+// GET /api/files/search?q=invoice — name search across the user's own storage.
+// Bounded walk so a huge tree can't stall the server.
+router.get('/search', (req, res) => {
+  const q = String(req.query.q || '').trim().toLowerCase();
+  if (q.length < 2) return res.status(400).json({ error: 'Type at least 2 characters' });
+  const root = userRoot(req);
+  const results = [];
+  const MAX_RESULTS = 100;
+  let budget = 20000;
+  let truncated = false;
+  const stack = [root];
+  while (stack.length) {
+    const dir = stack.pop();
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      if (--budget < 0 || results.length >= MAX_RESULTS) { truncated = true; break; }
+      if (!e.isFile() && !e.isDirectory()) continue;
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) stack.push(p);
+      if (!e.name.toLowerCase().includes(q)) continue;
+      let s;
+      try { s = fs.statSync(p); } catch { continue; }
+      results.push({
+        name: e.name,
+        path: relDisplay(root, p),
+        dir: e.isDirectory(),
+        size: e.isDirectory() ? null : s.size,
+        mtime: s.mtimeMs,
+        mime: e.isDirectory() ? null : guessMime(e.name),
+      });
+    }
+    if (truncated) break;
+  }
+  results.sort((a, b) => (a.dir !== b.dir ? (a.dir ? -1 : 1) : a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })));
+  res.json({ results, truncated });
+});
+
 // POST /api/files/upload?path=/docs&overwrite=0  (multipart, one or many files)
 router.post('/upload', (req, res, next) => {
   let target;
@@ -279,7 +317,8 @@ router.get('/preview', (req, res) => {
   if (!stat.isFile()) return res.status(400).json({ error: 'Not a file' });
   const pv = previewType(t.abs, path.basename(t.abs));
   if (!pv) return res.status(415).json({ error: 'No in-browser preview for this file type. Download it instead.' });
-  audit({ userId: req.user.id, username: req.user.username, action: 'preview', detail: displayPath(t), ip: req.ip });
+  // Grid thumbnails load many previews at once; only a real open is audited.
+  if (req.query.thumb !== '1') audit({ userId: req.user.id, username: req.user.username, action: 'preview', detail: displayPath(t), ip: req.ip });
   res.setHeader('Content-Type', pv.contentType);
   res.setHeader('Content-Length', stat.size);
   res.setHeader('X-Content-Type-Options', 'nosniff');

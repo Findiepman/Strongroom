@@ -102,7 +102,14 @@ router.get('/audit', (req, res) => {
   const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
   const clauses = [];
   const params = [];
-  if (req.query.action) { clauses.push('action = ?'); params.push(String(req.query.action)); }
+  if (req.query.action) {
+    // One action, or a comma-separated list ("upload,sftp.upload").
+    const actions = String(req.query.action).split(',').map((a) => a.trim()).filter(Boolean).slice(0, 20);
+    if (actions.length) {
+      clauses.push(`action IN (${actions.map(() => '?').join(',')})`);
+      params.push(...actions);
+    }
+  }
   if (req.query.user) { clauses.push('username = ?'); params.push(String(req.query.user)); }
   const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
   const rows = db.prepare(

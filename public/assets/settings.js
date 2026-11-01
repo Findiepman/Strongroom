@@ -2,8 +2,9 @@
 
 function renderUsage(used, quota) {
   const pct = quota > 0 ? Math.min(100, (used / quota) * 100) : 0;
-  document.getElementById('usage-label').textContent = `${fmtBytes(used)} of ${fmtBytes(quota)}`;
-  document.getElementById('usage-pct').textContent = pct.toFixed(1) + '%';
+  document.getElementById('usage-used').textContent = fmtBytes(used);
+  document.getElementById('usage-of').textContent = `of ${fmtBytes(quota)}`;
+  document.getElementById('usage-pct').textContent = pct.toFixed(pct < 10 ? 1 : 0) + '%';
   const fill = document.getElementById('usage-fill');
   fill.style.width = pct.toFixed(1) + '%';
   fill.classList.toggle('full', pct > 90);
@@ -35,19 +36,21 @@ document.getElementById('password-form').addEventListener('submit', async (e) =>
 
 (async () => {
   const user = await Shell.init('settings');
-
-  const usage = await withBusy(() => API.call('/api/user/usage'));
-  renderUsage(usage.usedBytes, usage.quotaBytes);
-  Shell.updateGauge(usage.usedBytes, usage.quotaBytes);
+  hydrateIcons();
 
   const kv = document.getElementById('account-kv');
   const rows = [
-    ['username', user.username],
-    ['role', user.role],
-    ['quota', fmtBytes(user.quotaBytes)],
+    ['Username', user.username],
+    ['Role', user.role === 'admin' ? 'Admin' : 'Member'],
+    ['Quota', fmtBytes(user.quotaBytes)],
   ];
   for (const [k, v] of rows) {
     kv.append(el('dt', {}, k));
-    kv.append(el('dd', {}, el('span', { class: 'val' }, v)));
+    kv.append(el('dd', {}, el('span', {}, v)));
   }
+
+  renderUsage(user.usedBytes, user.quotaBytes);
+  const usage = await withBusy(() => API.call('/api/user/usage'));
+  renderUsage(usage.usedBytes, usage.quotaBytes);
+  Shell.updateGauge(usage.usedBytes, usage.quotaBytes);
 })();

@@ -3,54 +3,115 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>strongroom / files</title>
+<meta name="theme-color" content="#12100e">
+<title>Strongroom</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&family=Unbounded:wght@500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body>
-<div id="app">
-  <div class="spread">
-    <div class="row">
-      <button class="btn primary" id="upload-btn">Upload</button>
-      <button class="btn" id="upload-folder-btn">Upload folder</button>
-      <button class="btn" id="mkdir-btn">New folder</button>
-      <button class="btn danger" id="delete-btn" disabled>Delete</button>
-    </div>
-    <div class="dropzone" id="dropzone">drop files anywhere to upload</div>
-  </div>
-  <input type="file" id="file-input" multiple hidden>
-  <input type="file" id="folder-input" webkitdirectory hidden>
+<main id="app">
 
-  <div class="panel" id="upload-panel" hidden>
-    <h2>Uploads</h2>
-    <div class="upload-list" id="upload-list"></div>
-  </div>
-
-  <div class="table-wrap">
-    <table id="file-table">
-      <thead>
-        <tr>
-          <th style="width:34px"><input type="checkbox" id="select-all" aria-label="Select all"></th>
-          <th>Name</th>
-          <th class="optional">Type</th>
-          <th style="text-align:right">Size</th>
-          <th class="optional">Modified</th>
-          <th style="width:1%"></th>
-        </tr>
-      </thead>
-      <tbody id="file-rows"></tbody>
-    </table>
-    <div class="empty" id="empty-state" hidden>
-      This folder is empty.
-      <span class="mono">upload files or create a folder to get started</span>
+  <!-- Home overview: only at the top of your files, not inside folders or search -->
+  <section class="bento" id="home" hidden>
+    <div class="card">
+      <div class="card-h"><span class="eyebrow">Storage</span><small id="quota-text"></small></div>
+      <div class="storage">
+        <div class="donut" id="donut"><div class="donut-hole"><b id="donut-used">…</b><small id="donut-of"></small></div></div>
+        <div class="legend" id="legend"></div>
+      </div>
+      <p class="quota-warn" id="quota-warn" hidden></p>
     </div>
-  </div>
+
+    <div class="card drop-tile" id="drop-tile" role="button" tabindex="0" aria-label="Upload files">
+      <span class="eyebrow">Upload</span>
+      <div class="big">Drop files or a whole folder</div>
+      <div class="acts">
+        <span class="go" id="tile-files"></span>
+        <span class="go alt" id="tile-folder"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><span class="eyebrow">Pinned</span><small>this browser</small></div>
+      <div class="pins" id="pins"></div>
+    </div>
+
+    <div class="card span-2">
+      <div class="card-h"><span class="eyebrow">Recent uploads</span></div>
+      <div class="recent" id="recent"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><span class="eyebrow">Activity</span><a class="link" id="audit-link" href="/admin#audit" hidden>Audit log</a></div>
+      <div class="activity" id="activity"></div>
+    </div>
+  </section>
+
+  <section class="browser">
+    <div class="btop">
+      <h2 id="browser-title">My files</h2>
+      <div class="chips" id="chips" role="group" aria-label="Show">
+        <button class="chip" data-filter="all" aria-pressed="true">All</button>
+        <button class="chip" data-filter="folders" data-icon="folder">Folders</button>
+        <button class="chip" data-filter="images" data-icon="image">Images</button>
+        <button class="chip" data-filter="docs" data-icon="text">Docs</button>
+        <button class="chip" data-filter="archives" data-icon="zip">Archives</button>
+      </div>
+      <select id="sort" aria-label="Sort by">
+        <option value="name">Name</option>
+        <option value="mtime">Modified</option>
+        <option value="size">Size</option>
+      </select>
+      <div class="seg" role="group" aria-label="View">
+        <button data-view="list" aria-label="List view" data-icon="list"></button>
+        <button data-view="grid" aria-label="Grid view" data-icon="grid"></button>
+      </div>
+      <button class="btn" id="mkdir-btn" data-icon="folderplus">New folder</button>
+      <button class="btn pri" id="upload-btn" data-icon="upload">Upload</button>
+    </div>
+
+    <nav class="crumb" id="crumb" aria-label="Location"></nav>
+
+    <div class="thead" id="thead">
+      <span><input type="checkbox" id="select-all" aria-label="Select all"></span>
+      <span></span>
+      <button data-sort="name">Name</button>
+      <button data-sort="size" class="r c-size">Size</button>
+      <button data-sort="mtime" class="c-when">Modified</button>
+      <span></span>
+    </div>
+    <div id="files"></div>
+    <div class="empty" id="empty" hidden></div>
+  </section>
+</main>
+
+<input type="file" id="file-input" multiple hidden>
+<input type="file" id="folder-input" webkitdirectory hidden>
+
+<div class="selbar" id="selbar" hidden>
+  <b id="sel-count"></b>
+  <button class="btn" id="sel-download" data-icon="download"><span>Download</span></button>
+  <button class="btn dng" id="sel-delete" data-icon="trash"><span>Delete</span></button>
+  <button class="icon-btn" id="sel-clear" aria-label="Clear selection" data-icon="x"></button>
 </div>
+
+<div class="tray" id="tray" hidden>
+  <div class="tray-h">
+    <span id="tray-head"></span>
+    <button class="icon-btn" id="tray-toggle" aria-label="Collapse" data-icon="chevd"></button>
+    <button class="icon-btn" id="tray-close" aria-label="Close" data-icon="x"></button>
+  </div>
+  <div class="tray-total"><i id="tray-bar"></i></div>
+  <div class="tray-list" id="tray-list"></div>
+</div>
+
+<div class="drag-veil" id="drag-veil" hidden>Drop to upload here</div>
 
 <dialog id="mkdir-dialog">
   <h2>New folder</h2>
+  <p class="sub" id="mkdir-where"></p>
   <form method="dialog">
     <div class="field">
       <label for="mkdir-name">Folder name</label>
@@ -58,8 +119,8 @@
     </div>
     <p class="error-line" id="mkdir-error"></p>
     <div class="dialog-actions">
-      <button class="btn" value="cancel">Cancel</button>
-      <button class="btn primary" id="mkdir-confirm" value="default">Create</button>
+      <button class="btn ghost" value="cancel">Cancel</button>
+      <button class="btn pri" value="default">Create folder</button>
     </div>
   </form>
 </dialog>
@@ -73,28 +134,26 @@
     </div>
     <p class="error-line" id="rename-error"></p>
     <div class="dialog-actions">
-      <button class="btn" value="cancel">Cancel</button>
-      <button class="btn primary" id="rename-confirm" value="default">Rename</button>
+      <button class="btn ghost" value="cancel">Cancel</button>
+      <button class="btn pri" value="default">Rename</button>
     </div>
   </form>
 </dialog>
 
 <dialog id="delete-dialog">
-  <h2>Delete</h2>
+  <h2 id="delete-title">Delete?</h2>
   <p class="sub" id="delete-summary"></p>
   <div class="dialog-actions">
-    <button class="btn" id="delete-cancel">Cancel</button>
-    <button class="btn danger" id="delete-confirm">Delete</button>
+    <button class="btn ghost" id="delete-cancel">Cancel</button>
+    <button class="btn danger" id="delete-confirm">Delete for good</button>
   </div>
 </dialog>
 
-<dialog id="preview-dialog" class="preview-dialog">
-  <div class="spread" style="margin-bottom:12px">
-    <h2 class="mono" id="preview-title" style="margin:0"></h2>
-    <div class="row">
-      <button class="btn-ghost" id="preview-download">download</button>
-      <button class="btn-ghost" id="preview-close">close</button>
-    </div>
+<dialog id="preview-dialog" class="preview">
+  <div class="preview-h">
+    <div class="meta"><b id="preview-title"></b><small id="preview-sub"></small></div>
+    <button class="btn sm" id="preview-download" data-icon="download">Download</button>
+    <button class="icon-btn" id="preview-close" aria-label="Close" data-icon="x"></button>
   </div>
   <div class="preview-body" id="preview-body"></div>
 </dialog>

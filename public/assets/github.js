@@ -1,7 +1,7 @@
 'use strict';
 
 const logPane = document.getElementById('log-pane');
-const repoRows = document.getElementById('repo-rows');
+const repoList = document.getElementById('repo-list');
 const repoEmpty = document.getElementById('repo-empty');
 const pullBtn = document.getElementById('pull-btn');
 let eventSource = null;
@@ -43,11 +43,9 @@ function watchJob(jobId) {
   };
 }
 
-document.getElementById('pull-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
+async function pull(url) {
   const errEl = document.getElementById('pull-error');
   errEl.textContent = '';
-  const url = document.getElementById('repo-url').value.trim();
   if (!url) { errEl.textContent = 'Paste a repository URL first'; return; }
   try {
     const data = await API.call('/api/github/repos', { method: 'POST', body: { url } });
@@ -55,36 +53,33 @@ document.getElementById('pull-form').addEventListener('submit', async (e) => {
     logLine(`${data.op === 'clone' ? 'Cloning' : 'Pulling'} ${data.repo}`);
     watchJob(data.jobId);
   } catch (err) {
-    if (err.status === 409 && err.message.includes('already running')) {
-      errEl.textContent = err.message;
-    } else {
-      errEl.textContent = err.message;
-    }
+    errEl.textContent = err.message;
   }
+}
+
+document.getElementById('pull-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  pull(document.getElementById('repo-url').value.trim());
 });
 
 async function loadRepos() {
   try {
     const data = await API.call('/api/github/repos');
-    repoRows.textContent = '';
+    repoList.textContent = '';
     repoEmpty.hidden = data.repos.length > 0;
+    repoEmpty.textContent = '';
+    if (!data.repos.length) repoEmpty.append(icon('branch'), el('b', {}, 'No repositories yet'), 'Pull one with the form.');
+    document.getElementById('repo-count').textContent = data.repos.length ? `${data.repos.length} repo${data.repos.length === 1 ? '' : 's'}` : '';
     for (const r of data.repos) {
-      repoRows.append(el('tr', {},
-        el('td', { class: 'mono' }, r.name),
-        el('td', {}, el('div', { class: 'row', style: 'flex-wrap:nowrap' },
-          el('span', { class: 'led' + (r.running ? ' on' : '') }),
-          el('span', { class: 'mono', style: 'font-size:12px; color:var(--muted)' }, r.running ? 'pulling' : 'idle'))),
-        el('td', { class: 'num optional' }, fmtDate(r.mtime)),
-        el('td', { class: 'actions' },
-          r.hasIndex ? el('a', {
-            class: 'btn-ghost', style: 'text-decoration:none',
-            href: '/live/' + encodeURIComponent(r.name) + '/',
-            target: '_blank', rel: 'noopener',
-          }, 'go live') : null,
-          el('a', {
-            class: 'btn-ghost', style: 'text-decoration:none',
-            href: '/files?path=' + encodeURIComponent('/repos/' + r.name),
-          }, 'browse'))));
+      const fi = el('span', { class: 'fi' }, icon('branch'));
+      repoList.append(el('div', { class: 'repo' },
+        fi,
+        el('div', { class: 'meta' },
+          el('b', {}, r.name),
+          el('small', {}, el('span', { class: 'live-dot' + (r.running ? ' on' : '') }), r.running ? ' pulling now' : ` updated ${relTime(r.mtime)}`)),
+        el('div', { class: 'acts' },
+          r.hasIndex ? el('a', { class: 'btn sm', href: '/live/' + encodeURIComponent(r.name) + '/', target: '_blank', rel: 'noopener' }, icon('external', 'sm'), 'Live') : null,
+          el('a', { class: 'btn sm', href: '/files?path=' + encodeURIComponent('/repos/' + r.name) }, icon('folder', 'sm'), 'Browse'))));
       if (r.running && r.jobId && !eventSource) watchJob(r.jobId);
     }
   } catch (err) {
@@ -94,5 +89,6 @@ async function loadRepos() {
 
 (async () => {
   await Shell.init('github');
+  hydrateIcons();
   await loadRepos();
 })();

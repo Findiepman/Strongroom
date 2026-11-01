@@ -533,7 +533,9 @@ function startSftpServer() {
             }
             handles.clear();
           };
-          sftp.on('end', cleanup);
+          // The client is done (EOF): close our side too. Without this, clients
+          // like rclone wait forever for the channel to close and never exit.
+          sftp.on('end', () => { cleanup(); try { sftp.end(); } catch { /* already closed */ } });
           sftp.on('close', cleanup);
         });
       });

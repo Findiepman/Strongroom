@@ -329,3 +329,14 @@ test('an interrupted upload never lands in storage and leaves no temp file', asy
   assert.deepEqual(tmpLeft(), []);
   assert.equal(fs.existsSync(path.join(HOME, 'half.txt')), false);
 });
+
+test('server closes the SFTP channel when the client is done (rclone would hang otherwise)', async () => {
+  const { c, s } = await connect();
+  const closed = new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('server never closed the channel')), 3000);
+    s.on('close', () => { clearTimeout(t); resolve(); });
+  });
+  s.end(); // client EOF, like rclone at exit
+  await closed;
+  c.end();
+});

@@ -6,9 +6,9 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 const rateLimit = require('express-rate-limit');
 const config = require('../config');
-const { audit, createSession, deleteSession, getUserByUsername, setUsedBytes } = require('../db');
+const { audit, createSession, deleteSession, getUserByUsername } = require('../db');
 const { requireAuth, csrfProtect, setAuthCookie, clearAuthCookie } = require('../middleware/auth');
-const { dirSize } = require('../util/paths');
+const usage = require('../util/usage');
 
 const router = express.Router();
 
@@ -47,12 +47,11 @@ router.post('/login', loginLimiter, async (req, res, next) => {
       return res.status(401).json({ error: 'Wrong username or password' });
     }
 
-    // Refresh usage on login so the gauge is honest even after SFTP-side changes.
-    const userRoot = path.join(config.STORAGE_ROOT, user.username);
-    fs.mkdirSync(userRoot, { recursive: true });
-    const used = dirSize(userRoot);
-    setUsedBytes(user.id, used);
-    user.used_bytes = used;
+    // Recount usage on login so the gauge is honest even after SFTP/NAS-side
+    // changes. In the background: on a big tree this takes a while, and the
+    // sign-in doesn't wait for it.
+    fs.mkdirSync(path.join(config.STORAGE_ROOT, user.username), { recursive: true });
+    usage.refresh(user).catch(() => {});
 
     const session = createSession(user.id, req.ip, req.get('user-agent'));
     const token = jwt.sign({ sid: session.id }, config.JWT_SECRET, {

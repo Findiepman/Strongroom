@@ -110,12 +110,18 @@ Shell.onSearch = (value, now) => {
 
 const PALETTE = ['var(--ac)', 'var(--t-image)', 'var(--t-folder)', 'var(--t-arc)', 'var(--t-media)'];
 
-async function loadOverview() {
+let overviewRetry = null;
+async function loadOverview(tries = 0) {
+  clearTimeout(overviewRetry);
   try {
     const ov = await API.call('/api/user/overview');
     state.overview = ov;
     Shell.updateGauge(ov.usedBytes, ov.quotaBytes);
     renderOverview();
+    // First time ever, the server is still counting folder sizes: ask again shortly.
+    if (ov.sizesPending && tries < 40) {
+      overviewRetry = setTimeout(() => { if (state.path === '/' && !state.search) loadOverview(tries + 1); }, 3000);
+    }
   } catch (err) {
     toast(err.message, true);
   }
@@ -149,7 +155,7 @@ function renderOverview() {
 
   const legend = $('legend');
   legend.textContent = '';
-  if (!parts.length) legend.append(el('span', {}, el('em', {}, 'Nothing stored yet')));
+  if (!parts.length) legend.append(el('span', {}, el('em', {}, ov.sizesPending ? 'Counting folder sizes…' : 'Nothing stored yet')));
   for (const p of parts) {
     const dot = el('i');
     dot.style.background = p.color;

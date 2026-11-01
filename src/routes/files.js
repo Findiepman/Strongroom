@@ -8,10 +8,11 @@ const archiver = require('archiver');
 const config = require('../config');
 const { db, audit, addUsedBytes } = require('../db');
 const { requireAuth, csrfProtect } = require('../middleware/auth');
-const { safeResolve, validateName, relDisplay, dirSize, PathError } = require('../util/paths');
+const { safeResolve, validateName, relDisplay, PathError } = require('../util/paths');
 const { validateUpload, previewType, guessMime } = require('../util/filetype');
 const { assertNotReserved, moveIntoPlace } = require('../util/storage');
 const locks = require('../util/locks');
+const usage = require('../util/usage');
 
 const router = express.Router();
 router.use(requireAuth, csrfProtect);
@@ -261,6 +262,7 @@ router.post('/upload', (req, res, next) => {
 
   busboy.on('close', async () => {
     await Promise.all(pending);
+    if (results.some((r) => r.ok)) usage.markDirty(req.user.id);
     res.json({ results, usedBytes: usedNow, quotaBytes: quota });
   });
   busboy.on('error', () => res.status(400).json({ error: 'Upload stream failed. Try again.' }));
@@ -371,7 +373,7 @@ router.post('/rename', (req, res) => {
 });
 
 // POST /api/files/delete {paths: ["/a.txt", "/docs"]}
-router.post('/delete', (req, res) => {
+router.post('/delete', async (req, res) => {
   const { paths } = req.body || {};
   if (!Array.isArray(paths) || paths.length === 0 || paths.length > 200) {
     return res.status(400).json({ error: 'Send between 1 and 200 paths' });
@@ -385,8 +387,10 @@ router.post('/delete', (req, res) => {
       if (t.abs === path.resolve(t.root)) throw new PathError('Cannot delete the root folder');
       locks.assertInsideOpen(req, t.rel);
       const stat = fs.lstatSync(t.abs);
-      const size = stat.isDirectory() ? dirSize(t.abs) : stat.size;
-      fs.rmSync(t.abs, { recursive: true, force: false });
+      // A big folder takes a while to count and remove; both run without
+      // blocking the server.
+      const size = stat.isDirectory() ? await usage.sizeOf(t.abs) : stat.size;
+      await fs.promises.rm(t.abs, { recursive: true, force: false });
       freed += size;
       audit({ userId: req.user.id, username: req.user.username, action: 'delete', detail: `${relDisplay(t.root, t.abs)} (${size} bytes)`, ip: req.ip });
       results.push({ path: rel, ok: true });
@@ -395,6 +399,7 @@ router.post('/delete', (req, res) => {
     }
   }
   if (freed > 0) addUsedBytes(req.user.id, -freed);
+  if (results.some((r) => r.ok)) usage.markDirty(req.user.id);
   res.json({ results });
 });
 

@@ -4,10 +4,10 @@ const express = require('express');
 const bcrypt = require('bcrypt');
 const rateLimit = require('express-rate-limit');
 const config = require('../config');
-const { db, audit, deleteUserSessions, setUsedBytes } = require('../db');
+const { db, audit, deleteUserSessions } = require('../db');
 const { requireAuth, csrfProtect } = require('../middleware/auth');
-const { dirSize } = require('../util/paths');
 const locks = require('../util/locks');
+const usage = require('../util/usage');
 
 const router = express.Router();
 router.use(requireAuth, csrfProtect);
@@ -46,34 +46,28 @@ router.post('/password', passwordLimiter, async (req, res, nextFn) => {
   }
 });
 
-// GET /api/user/usage — recomputed from disk, not the cached column
-router.get('/usage', (req, res) => {
-  const root = path.join(config.STORAGE_ROOT, req.user.username);
-  const used = dirSize(root);
-  setUsedBytes(req.user.id, used);
-  res.json({ usedBytes: used, quotaBytes: req.user.quota_bytes });
+// GET /api/user/usage — recounted from disk now (asynchronously: the server
+// keeps serving other requests meanwhile), not the cached column
+router.get('/usage', (req, res, next) => {
+  usage.refresh(req.user)
+    .then((u) => res.json({ usedBytes: u.usedBytes, quotaBytes: req.user.quota_bytes }))
+    .catch(next);
 });
 
 // GET /api/user/overview — everything the home screen shows in one call:
 // storage split by top-level folder, recent uploads, and recent activity
-// (the user's own; admins see everyone's). Usage is recomputed from disk.
+// (the user's own; admins see everyone's). Folder sizes come from the last
+// count (src/util/usage.js), which is redone in the background when it's old;
+// walking a big tree here used to freeze the whole server on every reload.
 router.get('/overview', (req, res) => {
   const fs = require('fs');
   const root = path.join(config.STORAGE_ROOT, req.user.username);
   fs.mkdirSync(root, { recursive: true });
 
-  const breakdown = [];
-  let looseBytes = 0;
-  for (const e of fs.readdirSync(root, { withFileTypes: true })) {
-    const p = path.join(root, e.name);
-    try {
-      if (e.isDirectory()) breakdown.push({ name: e.name, bytes: dirSize(p) });
-      else if (e.isFile()) looseBytes += fs.statSync(p).size;
-    } catch { /* vanished mid-walk */ }
-  }
-  breakdown.sort((a, b) => b.bytes - a.bytes);
-  const used = breakdown.reduce((n, b) => n + b.bytes, looseBytes);
-  setUsedBytes(req.user.id, used);
+  const sizes = usage.current(req.user);
+  const breakdown = sizes.breakdown;
+  const looseBytes = sizes.looseBytes;
+  const used = req.user.used_bytes; // kept up to date by uploads/deletes and by each count
 
   // Recent uploads that still exist where they were put, leaving out what's in
   // a locked folder this session hasn't opened.
@@ -111,6 +105,8 @@ router.get('/overview', (req, res) => {
     quotaBytes: req.user.quota_bytes,
     breakdown,
     looseBytes,
+    sizesPending: sizes.pending, // no count yet: the page asks again in a bit
+    sizesAt: sizes.computedAt,
     recent,
     activity,
     activityScope: isAdmin ? 'everyone' : 'you',

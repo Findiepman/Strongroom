@@ -11,6 +11,7 @@ const { validateName } = require('./util/paths');
 const { validateUpload } = require('./util/filetype');
 const { assertNotReserved, moveIntoPlace } = require('./util/storage');
 const locks = require('./util/locks');
+const usage = require('./util/usage');
 
 const DUMMY_HASH = bcrypt.hashSync('not-a-real-password', config.BCRYPT_COST);
 
@@ -167,7 +168,10 @@ function startSftpServer() {
       }).catch(() => ctx.reject(['password']));
     });
 
-    const log = (action, detail) => audit({ userId: user.id, username: user.username, action, detail, ip });
+    const log = (action, detail) => {
+      audit({ userId: user.id, username: user.username, action, detail, ip });
+      if (/^sftp\.(upload|delete|rename)$/.test(action)) usage.markDirty(user.id); // home screen sizes
+    };
     // Looked up on every request, so a folder locked in the web app is closed
     // to an SFTP connection that's already open.
     const lockedPaths = () => locks.locksOf(user.id).map((l) => l.relpath);

@@ -57,6 +57,29 @@ app.use('/api/sftp', require('./src/routes/sftp-info'));
 // --- Pages ---
 const PUBLIC_DIR = path.join(config.ROOT, 'public');
 const page = (name) => path.join(PUBLIC_DIR, name);
+const ASSETS_DIR = path.join(PUBLIC_DIR, 'assets');
+
+// Cache busting: every /assets/*.css|js link in a page gets ?v=<fingerprint of
+// the assets folder>. After a git pull the fingerprint changes, so browsers and
+// Cloudflare fetch the new files instead of mixing new pages with old cached
+// scripts. Computed from names, sizes and mtimes, so it needs no restart.
+function assetVersion() {
+  const fs = require('fs');
+  const crypto = require('crypto');
+  const h = crypto.createHash('sha1');
+  for (const name of fs.readdirSync(ASSETS_DIR).sort()) {
+    const s = fs.statSync(path.join(ASSETS_DIR, name));
+    h.update(`${name}:${s.size}:${s.mtimeMs};`);
+  }
+  return h.digest('hex').slice(0, 10);
+}
+function sendPage(res, name) {
+  const fs = require('fs');
+  const html = fs.readFileSync(page(name), 'utf8')
+    .replace(/(["'])(\/assets\/[\w.-]+\.(?:css|js))\1/g, `$1$2?v=${assetVersion()}$1`);
+  res.setHeader('Cache-Control', 'no-cache');
+  res.type('html').send(html);
+}
 
 // Server-side gate for app pages: no session, no HTML.
 function pageAuth(req, res, next) {
@@ -68,16 +91,16 @@ function pageAuth(req, res, next) {
 app.get('/', (req, res) => {
   resolveSession(req, res);
   if (req.user) return res.redirect('/files');
-  res.sendFile(page('login.html'));
+  sendPage(res, 'login.html');
 });
-app.get('/files', pageAuth, (req, res) => res.sendFile(page('files.html')));
-app.get('/github', pageAuth, (req, res) => res.sendFile(page('github.html')));
-app.get('/sftp', pageAuth, (req, res) => res.sendFile(page('sftp.html')));
-app.get('/settings', pageAuth, (req, res) => res.sendFile(page('settings.html')));
+app.get('/files', pageAuth, (req, res) => sendPage(res, 'files.html'));
+app.get('/github', pageAuth, (req, res) => sendPage(res, 'github.html'));
+app.get('/sftp', pageAuth, (req, res) => sendPage(res, 'sftp.html'));
+app.get('/settings', pageAuth, (req, res) => sendPage(res, 'settings.html'));
 // Admin page: role checked server-side, same as the admin API.
 app.get('/admin', pageAuth, (req, res) => {
   if (req.user.role !== 'admin') return res.redirect('/files');
-  res.sendFile(page('admin.html'));
+  sendPage(res, 'admin.html');
 });
 
 app.use('/assets', express.static(path.join(PUBLIC_DIR, 'assets'), { maxAge: '1h' }));

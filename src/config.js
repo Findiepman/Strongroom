@@ -27,7 +27,9 @@ const config = {
   STORAGE_ROOT: path.resolve(process.env.STORAGE_ROOT || path.join(DATA_DIR, 'storage')),
   SFTP_ROOT: path.resolve(process.env.SFTP_ROOT || path.join(DATA_DIR, 'sftp')),
   REPOS_ROOT: path.resolve(process.env.REPOS_ROOT || path.join(DATA_DIR, 'repos')),
-  TMP_DIR: path.join(DATA_DIR, 'tmp'),
+  // Upload staging. Put it on the same disk as STORAGE_ROOT (e.g. the NAS
+  // mount) so finished uploads move into place with an atomic rename.
+  TMP_DIR: path.resolve(process.env.TMP_DIR || path.join(DATA_DIR, 'tmp')),
   LOG_DIR: path.join(DATA_DIR, 'logs'),
 
   COOKIE_NAME: 'strongroom_session',

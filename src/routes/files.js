@@ -48,6 +48,25 @@ function assertNotReserved(destDir, root, name) {
   }
 }
 
+// Uploads stage in TMP_DIR and are renamed into place. When storage lives on
+// another disk (a NAS mount) and TMP_DIR doesn't, rename fails with EXDEV:
+// fall back to copy + delete. Set TMP_DIR on the same mount to keep it atomic.
+function moveIntoPlace(from, to) {
+  try {
+    fs.renameSync(from, to);
+  } catch (err) {
+    if (err.code !== 'EXDEV') throw err;
+    const part = to + '.' + crypto.randomBytes(4).toString('hex') + '.part';
+    try {
+      fs.copyFileSync(from, part);
+      fs.renameSync(part, to); // same disk now, so the final swap is still atomic
+    } finally {
+      fs.rmSync(part, { force: true });
+      fs.rmSync(from, { force: true });
+    }
+  }
+}
+
 function readOnlyError(res) {
   return res.status(403).json({ error: 'Repos are read-only here. Update them with the GitHub puller.' });
 }
@@ -229,7 +248,7 @@ router.post('/upload', (req, res, next) => {
               return resolve();
             }
             const replacedSize = overwrite && fs.existsSync(dest) ? fs.statSync(dest).size : 0;
-            fs.renameSync(tmpPath, dest);
+            moveIntoPlace(tmpPath, dest);
             usedNow += written - replacedSize;
             addUsedBytes(req.user.id, written - replacedSize);
             const rel = relDisplay(root, dest);

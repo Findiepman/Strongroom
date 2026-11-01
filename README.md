@@ -59,6 +59,7 @@ runs entirely out of `./data/` and generates its own dev JWT secret.
 | `SFTP_ROOT` | `./data/sftp` | SFTP jails; users land in `<SFTP_ROOT>/<username>/` |
 | `REPOS_ROOT` | `./data/repos` | Where pulled GitHub repos live |
 | `DATA_DIR` | `./data` | SQLite DB, SSH host key, temp uploads, logs |
+| `TMP_DIR` | `DATA_DIR/tmp` | Upload staging. Keep it on the same disk as `STORAGE_ROOT` (see the NAS section) |
 | `ADMIN_USERNAME` | `admin` | Bootstrap admin name (first run only) |
 | `ADMIN_PASSWORD` | random | Bootstrap admin password (first run only) |
 | `MAX_UPLOAD_BYTES` | `2147483648` | Per-file upload cap (2 GiB) |
@@ -109,6 +110,50 @@ NODE_ENV=production
 Keeping `DATA_DIR` on the same filesystem matters: uploads stream to a temp
 file and are moved into place with a rename, which is atomic only on the same
 disk.
+
+## Storing files on a NAS (NFS)
+
+The server keeps running strongroom; the NAS only holds the files. Keep
+`DATA_DIR` (the SQLite database) on the server's own disk: SQLite over NFS
+risks corrupted locks. Everything else goes on the NAS.
+
+On the NAS (Synology DSM): create a shared folder `strongroom`, turn on NFS
+(Control Panel → File Services → NFS, max protocol NFSv4.1), then on the shared
+folder add an NFS rule for the server's IP only: read/write, squash
+"Map all users to admin", security `sys`, async on.
+
+On the server:
+
+```bash
+sudo apt install nfs-common
+sudo mkdir -p /srv/nas
+echo '<nas-ip>:/volume1/strongroom  /srv/nas  nfs4  rw,hard,noatime,_netdev  0 0' | sudo tee -a /etc/fstab
+sudo systemctl daemon-reload && sudo mount /srv/nas
+sudo mkdir -p /srv/nas/{storage,sftp,repos,tmp}
+```
+
+`.env`:
+
+```
+STORAGE_ROOT=/srv/nas/storage
+SFTP_ROOT=/srv/nas/sftp
+REPOS_ROOT=/srv/nas/repos
+TMP_DIR=/srv/nas/tmp       # same disk as storage, so uploads land atomically
+DATA_DIR=/home/<you>/strongroom-data   # stays local
+```
+
+Make the service wait for the mount, so a NAS that's down never makes
+strongroom quietly write to an empty local folder instead. Add this override
+with `sudo systemctl edit strongroom`:
+
+```ini
+[Unit]
+RequiresMountsFor=/srv/nas
+```
+
+Move existing files over with the service stopped:
+`sudo rsync -a --info=progress2 <old STORAGE_ROOT>/ /srv/nas/storage/` (same
+for sftp and repos), update `.env`, then start strongroom again.
 
 ## Running as a service (systemd)
 

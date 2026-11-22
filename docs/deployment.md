@@ -18,7 +18,8 @@ cloudflared tunnel --url http://localhost:8080
 
 ### Permanent tunnel with your own hostname
 
-You need a free Cloudflare account with a domain on it.
+You need a free Cloudflare account with a domain added to it (a cheap or free
+domain works, as long as its nameservers point at Cloudflare).
 
 **1. Install cloudflared**
 

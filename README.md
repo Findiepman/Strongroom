@@ -199,7 +199,7 @@ How Strongroom protects accounts and files:
 - Admin pages and `/api/admin/*` check the role server-side on every request.
 - The GitHub puller runs `git` with an argument list (no shell), accepts only
   `https://github.com/owner/repo` URLs, keeps clones inside `REPOS_ROOT`, and
-  never forwards raw git output to the browser.
+  never forwards raw git output to the browser (it goes to `DATA_DIR/logs/git.log`).
 
 What it does not protect against: files are **not encrypted at rest**, so anyone
 with access to the disk or NAS share can read them (use full-disk encryption if

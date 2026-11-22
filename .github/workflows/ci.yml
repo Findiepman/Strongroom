@@ -47,6 +47,18 @@ jobs:
           sudo test -s /tmp/sr-data/.jwt-secret
           sudo test -s /tmp/sr-data/ssh_host_rsa_key
           ssh-keyscan -p 2222 localhost | grep -q ssh-rsa
+      - name: GitHub puller can clone inside the container
+        run: |
+          PASS=$(docker logs sr 2>&1 | sed -n 's/^ *Password: *//p')
+          curl -s -c jar -X POST http://localhost:8080/api/auth/login -H 'content-type: application/json' \
+            -d "{\"username\":\"admin\",\"password\":\"$PASS\"}" >/dev/null
+          CSRF=$(curl -s -b jar http://localhost:8080/api/auth/me | sed -n 's/.*"csrf":"\([^"]*\)".*/\1/p')
+          test -n "$CSRF"
+          curl -s -b jar -X POST http://localhost:8080/api/github/repos -H 'content-type: application/json' \
+            -H "x-csrf-token: $CSRF" -d '{"url":"https://github.com/expressjs/cors"}'
+          echo
+          for i in $(seq 1 30); do sudo test -f /tmp/sr-data/repos/cors/package.json && break; sleep 2; done
+          sudo test -f /tmp/sr-data/repos/cors/package.json
       - name: Survives a restart with the same data
         run: |
           docker restart sr

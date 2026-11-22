@@ -7,6 +7,8 @@ if [ "$(id -u)" = "0" ]; then
   if [ "$(stat -c %u /data)" != "$(id -u node)" ]; then
     chown -R node:node /data 2>/dev/null || echo "[strongroom] could not chown /data; make it writable for uid $(id -u node)"
   fi
+  # setpriv keeps root's HOME; git (GitHub puller) must not look in /root.
+  export HOME=/home/node
   exec setpriv --reuid=node --regid=node --init-groups "$@"
 fi
 exec "$@"

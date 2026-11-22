@@ -61,7 +61,14 @@ jobs:
           sudo test -f /tmp/sr-data/repos/cors/package.json
       - name: Survives a restart with the same data
         run: |
+          PASS=$(docker logs sr 2>&1 | sed -n 's/^ *Password: *//p' | head -1)
           docker restart sr
-          sleep 8
+          for i in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' sr)" = healthy ] && break
+            sleep 2
+          done
           docker logs sr 2>&1 | tail -5
-          [ "$(docker inspect -f '{{.State.Running}}' sr)" = true ]
+          [ "$(docker inspect -f '{{.State.Health.Status}}' sr)" = healthy ]
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8080/api/auth/login             -H 'content-type: application/json' -d "{\"username\":\"admin\",\"password\":\"$PASS\"}")
+          echo "login after restart: $code"
+          [ "$code" = 200 ]

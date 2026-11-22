@@ -1,0 +1,28 @@
+services:
+  strongroom:
+    image: ghcr.io/findiepman/strongroom:latest
+    container_name: strongroom
+    restart: unless-stopped
+    ports:
+      - "8080:8080"   # web interface
+      - "2222:2222"   # SFTP
+    volumes:
+      # Database, files, pulled repos and keys. To keep files on a specific
+      # disk, use a host folder instead, e.g.  - /mnt/storage/strongroom:/data
+      - strongroom-data:/data
+    environment:
+      # Leave empty to get a random admin password in the logs on first start:
+      #   docker compose logs strongroom | grep Password
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD: ""
+      DEFAULT_QUOTA_BYTES: "10737418240"   # 10 GiB for new accounts
+      # Sign-in cookies need HTTPS, or http://localhost. To try it from another
+      # machine over plain http on your LAN, set this to "false" temporarily.
+      # COOKIE_SECURE: "false"
+      # Behind a reverse proxy or Cloudflare Tunnel:
+      # TRUST_PROXY: "true"
+      # Hostname shown on the SFTP page:
+      # SFTP_PUBLIC_HOST: files.example.com
+
+volumes:
+  strongroom-data:

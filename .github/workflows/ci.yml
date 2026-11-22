@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  docker-smoke:
+    # Builds the image and checks a fresh container starts, prints the admin
+    # password and accepts a sign-in with it, the same way a new user would.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t strongroom:test .
+      - name: Start with a host folder owned by root (common on real installs)
+        run: |
+          sudo mkdir -p /tmp/sr-data
+          docker run -d --name sr -p 8080:8080 -p 2222:2222 -v /tmp/sr-data:/data strongroom:test
+          for i in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' sr)" = healthy ] && break
+            sleep 2
+          done
+          docker logs sr
+          [ "$(docker inspect -f '{{.State.Health.Status}}' sr)" = healthy ]
+      - name: Sign in with the generated password
+        run: |
+          PASS=$(docker logs sr 2>&1 | sed -n 's/^ *Password: *//p')
+          test -n "$PASS"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8080/api/auth/login \
+            -H 'content-type: application/json' -d "{\"username\":\"admin\",\"password\":\"$PASS\"}")
+          echo "login: $code"
+          [ "$code" = 200 ]
+          sudo test -s /tmp/sr-data/.jwt-secret
+          sudo test -s /tmp/sr-data/ssh_host_rsa_key
+          ssh-keyscan -p 2222 localhost | grep -q ssh-rsa
+      - name: Survives a restart with the same data
+        run: |
+          docker restart sr
+          sleep 8
+          docker logs sr 2>&1 | tail -5
+          [ "$(docker inspect -f '{{.State.Running}}' sr)" = true ]

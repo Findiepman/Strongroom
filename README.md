@@ -171,7 +171,8 @@ it again. With Docker:
 
 ```bash
 docker compose stop
-docker run --rm -v strongroom_strongroom-data:/data -v "$PWD":/backup alpine   sh -c "rm -rf /data/* /data/.[!.]* ; tar xzf /backup/strongroom-<date>.tar.gz -C /data"
+docker run --rm -v strongroom_strongroom-data:/data -v "$PWD":/backup alpine \
+  sh -c "rm -rf /data/* /data/.[!.]* ; tar xzf /backup/strongroom-<date>.tar.gz -C /data"
 docker compose start
 ```
 

@@ -69,6 +69,7 @@ jobs:
           done
           docker logs sr 2>&1 | tail -5
           [ "$(docker inspect -f '{{.State.Health.Status}}' sr)" = healthy ]
-          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8080/api/auth/login             -H 'content-type: application/json' -d "{\"username\":\"admin\",\"password\":\"$PASS\"}")
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8080/api/auth/login \
+            -H 'content-type: application/json' -d "{\"username\":\"admin\",\"password\":\"$PASS\"}")
           echo "login after restart: $code"
           [ "$code" = 200 ]

@@ -38,8 +38,11 @@ function resolveTarget(req, relPath, { lockCheck = true, followLeaf = true } = {
   const raw = String(relPath == null ? '' : relPath).replace(/\\/g, '/');
   const m = raw.match(/^\/?repos(?:\/(.*))?$/);
   if (m) {
-    // Repos are read-only, so every access follows the leaf.
-    const abs = assertRealInside(config.REPOS_ROOT, safeResolve(config.REPOS_ROOT, m[1] || ''));
+    // Repos are read-only, so every access follows the leaf. Inside a repo the
+    // path must also stay in that repo: a link in one repo can't open another.
+    let abs = assertRealInside(config.REPOS_ROOT, safeResolve(config.REPOS_ROOT, m[1] || ''));
+    const repo = path.relative(path.resolve(config.REPOS_ROOT), abs).split(path.sep)[0];
+    if (repo) abs = assertRealInside(path.join(config.REPOS_ROOT, repo), abs);
     return { abs, root: config.REPOS_ROOT, readOnly: true, prefix: '/repos', rel: null };
   }
   const root = userRoot(req);

@@ -99,7 +99,15 @@ router.delete('/users/:id', (req, res, next) => {
   } catch (err) {
     if (err.code !== 'ENOENT') return next(err); // account stays: nothing changed yet
   }
-  db.prepare('DELETE FROM users WHERE id = ?').run(target.id);
+  try {
+    db.prepare('DELETE FROM users WHERE id = ?').run(target.id);
+  } catch (err) {
+    // The account stays, so its files go back where it will look for them.
+    if (moved) {
+      try { fs.renameSync(path.join(config.STORAGE_ROOT, keptAs), folder); } catch (e) { console.error('[admin] could not move files back', keptAs, e.message); }
+    }
+    return next(err);
+  }
   const where = moved ? `files kept in ${keptAs}` : 'had no files';
   audit({ userId: req.user.id, username: req.user.username, action: 'user.delete', detail: `${target.username} (${where})`, ip: req.ip });
   res.json({ ok: true, note: moved ? `Account removed. Its files were kept on the server in ${keptAs}.` : 'Account removed.' });

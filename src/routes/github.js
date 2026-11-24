@@ -71,7 +71,7 @@ function repoCapError({ totalBytes, runningJobs, maxRepoBytes, maxTotalBytes }) 
 // onOver(bytes) once when it passes maxBytes. The walk is async and the next
 // check is only scheduled after the last one finished, so a big tree never
 // blocks the server or piles up walks. Returns a stop function.
-function watchSize(dir, maxBytes, onOver, intervalMs = 2000) {
+function watchSize(dir, maxBytes, onOver, intervalMs = 5000) {
   let stopped = false;
   let timer = null;
   const tick = async () => {
@@ -100,7 +100,7 @@ function pushLine(job, text) {
   for (const listener of job.listeners) listener(entry);
 }
 
-function startJob({ url, repoName, op, dest, user, ip }) {
+function startJob({ url, repoName, op, dest, user, ip, maxBytes = config.REPO_MAX_BYTES }) {
   const id = crypto.randomUUID();
   const job = { id, repo: repoName, op, status: 'running', lines: [], listeners: new Set(), startedAt: Date.now() };
   jobs.set(id, job);
@@ -113,27 +113,40 @@ function startJob({ url, repoName, op, dest, user, ip }) {
     ? ['-c', 'core.symlinks=false', 'clone', '--config', 'core.symlinks=false', '--progress', '--', url, dest]
     : ['-C', dest, '-c', 'core.symlinks=false', 'pull', '--ff-only', '--progress'];
 
+  // Own process group on Linux, so a kill also stops git's helpers
+  // (git-remote-https, index-pack) that would otherwise keep writing into the
+  // folder while it is being removed.
+  const ownGroup = process.platform !== 'win32';
   const child = spawn('git', args, {
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'echo', GCM_INTERACTIVE: 'never' },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
+    detached: ownGroup,
   });
+  const killGit = () => {
+    try {
+      if (ownGroup && child.pid) process.kill(-child.pid, 'SIGKILL');
+      else child.kill('SIGKILL');
+    } catch {
+      child.kill('SIGKILL');
+    }
+  };
 
   let rawOutput = '';
   const timer = setTimeout(() => {
     pushLine(job, 'Timed out, stopping git');
-    child.kill('SIGKILL');
+    killGit();
   }, config.GIT_TIMEOUT_MS);
 
   let oversize = 0; // bytes on disk when the size limit was hit
-  const stopWatch = watchSize(dest, config.REPO_MAX_BYTES, (bytes) => {
+  const stopWatch = watchSize(dest, maxBytes, (bytes) => {
     oversize = bytes;
     pushLine(job, `Repository passed the ${formatBytes(config.REPO_MAX_BYTES)} size limit, stopping git`);
-    child.kill('SIGKILL');
+    killGit();
   });
   const tooBigLine = () => (op === 'clone'
     ? `This repository is bigger than the ${formatBytes(config.REPO_MAX_BYTES)} limit. The partial copy was removed.`
-    : `This repository is now bigger than the ${formatBytes(config.REPO_MAX_BYTES)} limit. Ask an admin to remove it.`);
+    : `This pull grew the repository by more than the ${formatBytes(config.REPO_MAX_BYTES)} limit and was stopped. Ask an admin to remove it.`);
 
   let lastPct = {};
   const onData = (buf) => {
@@ -165,13 +178,9 @@ function startJob({ url, repoName, op, dest, user, ip }) {
 
   // This runs in an async handler: a throw here would be an unhandled
   // rejection, so a folder that can't be removed is only logged.
-  const removePartial = () => {
-    try {
-      fs.rmSync(dest, { recursive: true, force: true, maxRetries: 3 });
-    } catch (err) {
-      console.error('[github] could not remove partial clone', dest, err.message);
-    }
-  };
+  // Async: a big partial clone on the NAS takes seconds to remove.
+  const removePartial = () => fs.promises.rm(dest, { recursive: true, force: true, maxRetries: 3 })
+    .catch((err) => console.error('[github] could not remove partial clone', dest, err.message));
 
   child.on('close', async (code) => {
     clearTimeout(timer);
@@ -179,25 +188,27 @@ function startJob({ url, repoName, op, dest, user, ip }) {
     // A small repo can finish between two checks: measure once more at the end.
     if (!oversize && code === 0) {
       const bytes = await sizeOf(dest);
-      if (bytes > config.REPO_MAX_BYTES) oversize = bytes;
+      if (bytes > maxBytes) oversize = bytes;
     }
     try {
       fs.appendFileSync(gitLogPath, `\n--- ${new Date().toISOString()} ${op} ${repoName} by ${user.username} (exit ${code}) ---\n${rawOutput}\n`);
     } catch { /* log write is best-effort */ }
     if (job.status === 'running') {
+      // The partial clone is removed before the job stops counting as running,
+      // so a new clone of the same name can't start into a folder being deleted.
       if (oversize) {
+        if (op === 'clone') await removePartial();
+        // git was killed mid-pull: drop its lock so the next pull can run.
+        else await fs.promises.rm(path.join(dest, '.git', 'index.lock'), { force: true }).catch(() => {});
         job.status = 'failed';
         pushLine(job, tooBigLine());
-        if (op === 'clone') removePartial();
-        // git was killed mid-pull: drop its lock so the next pull can run.
-        else fs.rm(path.join(dest, '.git', 'index.lock'), { force: true }, () => {});
       } else if (code === 0) {
         job.status = 'done';
         pushLine(job, op === 'clone' ? 'Clone complete' : 'Pull complete');
       } else {
+        if (op === 'clone') await removePartial();
         job.status = 'failed';
         pushLine(job, friendlyError(code, rawOutput));
-        if (op === 'clone') removePartial();
       }
     }
     audit({ userId: user.id, username: user.username, action: 'repo.pull', detail: `${op} ${repoName}: ${job.status}`, ip });
@@ -233,30 +244,57 @@ router.post('/repos', async (req, res, next) => {
     return res.status(400).json({ error: 'Repository name is not allowed' });
   }
 
-  // Repos don't count toward anyone's quota, so they get their own caps.
-  let totalBytes;
+  // Cheap refusals first, so a click on a running repo never waits for a walk.
+  const running = [...jobs.values()].find((j) => j.repo === repoName && j.status === 'running');
+  if (running) return res.status(409).json({ error: 'A pull for this repository is already running', jobId: running.id });
+  const isPull = fs.existsSync(path.join(dest, '.git'));
+
+  // Repos don't count toward anyone's quota, so they get their own caps. The
+  // total cap only stops new clones: updating a repo that is already there
+  // must keep working even when the store is full. A pull may grow its repo
+  // by at most REPO_MAX_BYTES, so a repo that was already bigger before the
+  // caps existed can still be updated.
+  let maxBytes = config.REPO_MAX_BYTES;
   try {
-    totalBytes = await sizeOf(config.REPOS_ROOT);
+    if (isPull) {
+      maxBytes = (await sizeOf(dest)) + config.REPO_MAX_BYTES;
+    } else {
+      const capError = repoCapError({
+        totalBytes: await reposTotal(),
+        runningJobs: [...jobs.values()].filter((j) => j.status === 'running' && j.op === 'clone').length,
+        maxRepoBytes: config.REPO_MAX_BYTES,
+        maxTotalBytes: config.REPOS_MAX_TOTAL_BYTES,
+      });
+      if (capError) return res.status(507).json({ error: capError });
+    }
   } catch (err) {
     return next(err);
   }
-  const capError = repoCapError({
-    totalBytes,
-    runningJobs: [...jobs.values()].filter((j) => j.status === 'running').length,
-    maxRepoBytes: config.REPO_MAX_BYTES,
-    maxTotalBytes: config.REPOS_MAX_TOTAL_BYTES,
-  });
-  if (capError) return res.status(507).json({ error: capError });
 
   // Express 4 doesn't catch a throw after an await: pass it on by hand.
   try {
-    startAfterChecks(req, res, { url, repoName, dest });
+    startAfterChecks(req, res, { url, repoName, dest, maxBytes });
   } catch (err) {
     next(err);
   }
 });
 
-function startAfterChecks(req, res, { url, repoName, dest }) {
+// Total size of REPOS_ROOT, walked at most once a minute: on a NAS with many
+// repos the walk takes a while, and the clone button shouldn't wait for it
+// every time. Finished clones make it stale by at most a minute, which the
+// per-clone worst case in repoCapError covers for running ones.
+let totalCache = { bytes: 0, at: 0, walk: null };
+function reposTotal() {
+  if (Date.now() - totalCache.at < 60 * 1000) return Promise.resolve(totalCache.bytes);
+  if (!totalCache.walk) {
+    totalCache.walk = sizeOf(config.REPOS_ROOT)
+      .then((bytes) => { totalCache = { bytes, at: Date.now(), walk: null }; return bytes; })
+      .finally(() => { totalCache.walk = null; });
+  }
+  return totalCache.walk;
+}
+
+function startAfterChecks(req, res, { url, repoName, dest, maxBytes }) {
   // Checked after the await above, so two quick requests can't both start.
   const running = [...jobs.values()].find((j) => j.repo === repoName && j.status === 'running');
   if (running) return res.status(409).json({ error: 'A pull for this repository is already running', jobId: running.id });
@@ -265,7 +303,7 @@ function startAfterChecks(req, res, { url, repoName, dest }) {
   if (op === 'clone' && fs.existsSync(dest)) {
     return res.status(409).json({ error: 'A folder with this name exists but is not a git repository' });
   }
-  const job = startJob({ url: url.trim(), repoName, op, dest, user: req.user, ip: req.ip });
+  const job = startJob({ url: url.trim(), repoName, op, dest, user: req.user, ip: req.ip, maxBytes: op === 'clone' ? config.REPO_MAX_BYTES : maxBytes });
   res.status(202).json({ jobId: job.id, repo: repoName, op });
 }
 

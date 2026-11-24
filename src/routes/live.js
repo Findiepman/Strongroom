@@ -83,9 +83,14 @@ function locate(urlPath) {
 // from elsewhere on the server. A folder is served through its index.html
 // (only for a path ending in /; send redirects a bare folder there first),
 // so that is checked too.
-function leavesRepos(abs, urlPath) {
-  if (!isRealInside(config.REPOS_ROOT, abs)) return true;
-  return urlPath.endsWith('/') && !isRealInside(config.REPOS_ROOT, path.join(abs, 'index.html'));
+// Checked against the repo's own folder as well, so a link in repo A can't
+// serve repo B under A's token (and against REPOS_ROOT, in case the repo
+// folder itself is a link).
+function leavesRepos(abs, urlPath, repo) {
+  const repoRoot = path.join(config.REPOS_ROOT, repo);
+  const inside = (p) => isRealInside(config.REPOS_ROOT, p) && isRealInside(repoRoot, p);
+  if (!inside(abs)) return true;
+  return urlPath.endsWith('/') && !inside(path.join(abs, 'index.html'));
 }
 
 const router = express.Router();
@@ -125,7 +130,7 @@ router.use((req, res, next) => {
   // The token in the path is the only credential, never a cookie.
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-  if (leavesRepos(target.abs, rest)) return res.status(404).end();
+  if (leavesRepos(target.abs, rest, target.repo)) return res.status(404).end();
 
   // express.static resolves req.url against REPOS_ROOT; its folder redirects
   // use originalUrl, so they keep the token.

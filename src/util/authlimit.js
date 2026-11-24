@@ -31,7 +31,7 @@ function createAuthLimiter({
   maxFailures = 10,
   windowMs = 15 * 60 * 1000,
   maxInflight = 2,
-  maxQueued = 16,
+  maxQueued = 32, // rclone opens up to --transfers + --checkers connections at once
   maxEntries = 10000,
   now = Date.now,
 } = {}) {

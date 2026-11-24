@@ -113,7 +113,9 @@ function staysInside(abs, realJail) {
   for (;;) {
     let real;
     try {
-      real = fs.realpathSync(p);
+      // .native is one realpath(3) call; the JS version lstats every path part,
+      // which is a string of blocking round trips per request on the NFS mount.
+      real = fs.realpathSync.native(p);
     } catch (err) {
       if (err.code !== 'ENOENT' && err.code !== 'ENOTDIR') throw err;
       const up = path.dirname(p);
@@ -232,7 +234,7 @@ function startSftpServer() {
             user = { id: row.id, username: row.username };
             jail = jailFor(row.username);
             fs.mkdirSync(jail, { recursive: true });
-            realJail = fs.realpathSync(jail);
+            realJail = fs.realpathSync.native(jail); // same flavour as staysInside
             audit({ userId: user.id, username: user.username, action: 'sftp.login', ip });
             ctx.accept();
           } else if (ok && row) {

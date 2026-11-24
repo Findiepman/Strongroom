@@ -134,8 +134,8 @@ All settings are environment variables, read from `.env` or from the
 | `SFTP_PUBLIC_HOST` | request host | Hostname shown on the SFTP page |
 | `GIT_ALLOW_ANY_HTTPS_HOST` | `false` | `true` allows any https git host, not just github.com |
 | `GIT_TIMEOUT_SECONDS` | `300` | Kill a clone or pull after this long |
-| `REPO_MAX_BYTES` | `1073741824` | Largest single repo (1 GiB). A clone or pull that grows past it is stopped |
-| `REPOS_MAX_TOTAL_BYTES` | `10737418240` | All pulled repos together (10 GiB). No new clone or pull starts past it |
+| `REPO_MAX_BYTES` | `1073741824` | Largest new clone (1 GiB), and the most one pull may add to a repo. Past it git is stopped |
+| `REPOS_MAX_TOTAL_BYTES` | `10737418240` | All pulled repos together (10 GiB). No new clone starts past it; existing repos can still be pulled |
 | `TRUST_PROXY` | `false` | Set `true` behind nginx, Caddy or Cloudflare Tunnel so rate limits see real IPs |
 
 ## HTTPS and remote access

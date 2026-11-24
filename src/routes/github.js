@@ -141,7 +141,9 @@ function startJob({ url, repoName, op, dest, user, ip, maxBytes = config.REPO_MA
   let oversize = 0; // bytes on disk when the size limit was hit
   const stopWatch = watchSize(dest, maxBytes, (bytes) => {
     oversize = bytes;
-    pushLine(job, `Repository passed the ${formatBytes(config.REPO_MAX_BYTES)} size limit, stopping git`);
+    pushLine(job, op === 'clone'
+      ? `Repository passed the ${formatBytes(config.REPO_MAX_BYTES)} size limit, stopping git`
+      : `This pull added more than ${formatBytes(config.REPO_MAX_BYTES)}, stopping git`);
     killGit();
   });
   const tooBigLine = () => (op === 'clone'
@@ -196,10 +198,15 @@ function startJob({ url, repoName, op, dest, user, ip, maxBytes = config.REPO_MA
     if (job.status === 'running') {
       // The partial clone is removed before the job stops counting as running,
       // so a new clone of the same name can't start into a folder being deleted.
+      // A failed pull (killed for size or time, or git's own error) can leave
+      // git's lock files behind; only one job per repo runs, so they are ours,
+      // and without removing them every later pull fails.
+      if (op === 'pull' && (oversize || code !== 0)) {
+        await Promise.all(['index.lock', 'shallow.lock', 'HEAD.lock', 'ORIG_HEAD.lock']
+          .map((f) => fs.promises.rm(path.join(dest, '.git', f), { force: true }).catch(() => {})));
+      }
       if (oversize) {
         if (op === 'clone') await removePartial();
-        // git was killed mid-pull: drop its lock so the next pull can run.
-        else await fs.promises.rm(path.join(dest, '.git', 'index.lock'), { force: true }).catch(() => {});
         job.status = 'failed';
         pushLine(job, tooBigLine());
       } else if (code === 0) {
@@ -211,6 +218,7 @@ function startJob({ url, repoName, op, dest, user, ip, maxBytes = config.REPO_MA
         pushLine(job, friendlyError(code, rawOutput));
       }
     }
+    dropTotalCache();
     audit({ userId: user.id, username: user.username, action: 'repo.pull', detail: `${op} ${repoName}: ${job.status}`, ip });
     finish();
   });
@@ -281,17 +289,29 @@ router.post('/repos', async (req, res, next) => {
 
 // Total size of REPOS_ROOT, walked at most once a minute: on a NAS with many
 // repos the walk takes a while, and the clone button shouldn't wait for it
-// every time. Finished clones make it stale by at most a minute, which the
-// per-clone worst case in repoCapError covers for running ones.
-let totalCache = { bytes: 0, at: 0, walk: null };
+// every time. Running clones count at their worst case in repoCapError, and
+// every finished job drops the cache so its bytes are counted next time.
+let totalCache = { bytes: 0, at: 0, walk: null, gen: 0 };
 function reposTotal() {
   if (Date.now() - totalCache.at < 60 * 1000) return Promise.resolve(totalCache.bytes);
   if (!totalCache.walk) {
+    const gen = totalCache.gen;
     totalCache.walk = sizeOf(config.REPOS_ROOT)
-      .then((bytes) => { totalCache = { bytes, at: Date.now(), walk: null }; return bytes; })
+      .then((bytes) => {
+        // A job that finished during the walk may not be in this count: then
+        // use it once, but don't cache it.
+        if (gen === totalCache.gen) totalCache.at = Date.now();
+        totalCache.bytes = bytes;
+        return bytes;
+      })
       .finally(() => { totalCache.walk = null; });
   }
   return totalCache.walk;
+}
+// A finished job changed what is on disk: the next check walks again.
+function dropTotalCache() {
+  totalCache.at = 0;
+  totalCache.gen++;
 }
 
 function startAfterChecks(req, res, { url, repoName, dest, maxBytes }) {

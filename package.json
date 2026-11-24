@@ -1,6 +1,6 @@
 {
   "name": "strongroom",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Self-hosted personal file server: web UI, SFTP, GitHub puller",
   "main": "server.js",
   "private": true,

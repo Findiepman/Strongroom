@@ -12,8 +12,17 @@ const { validateUpload } = require('./util/filetype');
 const { assertNotReserved, moveIntoPlace } = require('./util/storage');
 const locks = require('./util/locks');
 const usage = require('./util/usage');
+const quota = require('./util/quota');
+const { createAuthLimiter } = require('./util/authlimit');
 
 const DUMMY_HASH = bcrypt.hashSync('not-a-real-password', config.BCRYPT_COST);
+
+// Same budget as the web login (10 per 15 minutes per IP), shared by every
+// SFTP connection. At most 2 bcrypt checks run at once per IP; the rest wait.
+const authLimiter = createAuthLimiter({ maxFailures: 10, windowMs: 15 * 60 * 1000, maxInflight: 2 });
+// One connection gets 3 password tries, then it is dropped: a guessing tool
+// has to reconnect, which costs it a new key exchange each time.
+const MAX_AUTH_FAILURES_PER_CONN = 3;
 
 // SFTP shares the web app's tree: every user lands in STORAGE_ROOT/<username>,
 // so files synced over SFTP (rclone bisync from Explorer) are the same files
@@ -93,6 +102,30 @@ function checkNewName(abs, jail) {
   return name;
 }
 
+// Storage sits on an NFS share where symlinks can appear from outside the app
+// (users can't make them over SFTP: SYMLINK is unhandled). resolveVirtual
+// only checks the path as written, so also check where it really leads.
+// A path that doesn't exist yet is judged by its deepest existing parent; a
+// dangling link counts as not existing (open/stat on it fail with ENOENT and
+// an upload or rename onto it replaces the link itself).
+function staysInside(abs, realJail) {
+  let p = abs;
+  for (;;) {
+    let real;
+    try {
+      real = fs.realpathSync(p);
+    } catch (err) {
+      if (err.code !== 'ENOENT' && err.code !== 'ENOTDIR') throw err;
+      const up = path.dirname(p);
+      if (up === p) return false;
+      p = up;
+      continue;
+    }
+    return real === realJail || real.startsWith(realJail + path.sep);
+  }
+}
+const escaped = () => denied('This path leads outside your folder');
+
 function statusFor(err) {
   if (!err) return STATUS_CODE.OK;
   if (err.sftpCode !== undefined) return err.sftpCode;
@@ -149,23 +182,73 @@ function startSftpServer() {
   const server = new Server({ hostKeys: [loadHostKey()] }, (client, info) => {
     let user = null; // { id, username }
     let jail = null;
+    let realJail = null; // jail with symlinks resolved (STORAGE_ROOT may itself be a link to the NAS)
     const ip = info.ip;
+    let gone = false;
+    client.on('close', () => { gone = true; });
+
+    let authFailures = 0;
+    let authAttempts = 0;
+    const refuse = (ctx) => {
+      authFailures++;
+      try { ctx.reject(['password']); } catch { /* connection gone */ }
+      if (authFailures >= MAX_AUTH_FAILURES_PER_CONN) {
+        try { client.end(); } catch { /* already closed */ }
+      }
+    };
+    // Refused without a bcrypt check, so a blocked IP costs us nothing.
+    const refuseBlocked = (ctx) => {
+      if (authLimiter.firstRefusal(ip)) {
+        audit({ action: 'sftp.login.blocked', detail: `too many failed logins; last username=${String(ctx.username).slice(0, 40)}`, ip });
+      }
+      refuse(ctx);
+    };
 
     client.on('authentication', (ctx) => {
+      // "none" is every client's opening probe, not a guess: not counted.
       if (ctx.method !== 'password') return ctx.reject(['password']);
-      const row = getUserByUsername(ctx.username);
-      bcrypt.compare(ctx.password, row ? row.password_hash : DUMMY_HASH).then((ok) => {
-        if (ok && row) {
-          user = { id: row.id, username: row.username };
-          jail = jailFor(row.username);
-          fs.mkdirSync(jail, { recursive: true });
-          audit({ userId: user.id, username: user.username, action: 'sftp.login', ip });
-          ctx.accept();
-        } else {
-          audit({ action: 'sftp.login.fail', detail: `username=${String(ctx.username).slice(0, 40)}`, ip });
-          ctx.reject(['password']);
+      // Counted on arrival, not when the check ends: a client that sends
+      // many tries at once without waiting still gets only 3 on this
+      // connection.
+      if (++authAttempts > MAX_AUTH_FAILURES_PER_CONN) {
+        try { ctx.reject(['password']); } catch { /* connection gone */ }
+        try { client.end(); } catch { /* already closed */ }
+        return;
+      }
+      if (authLimiter.isBlocked(ip)) return refuseBlocked(ctx);
+      authLimiter.acquire(ip).then(async (release) => {
+        if (!release) return refuse(ctx); // too many checks queued for this IP
+        try {
+          if (gone) return; // hung up while waiting: don't spend a bcrypt on it
+          // Others from this IP may have used up the budget while we waited.
+          if (authLimiter.isBlocked(ip)) return refuseBlocked(ctx);
+          const row = getUserByUsername(ctx.username);
+          // Unknown users still cost one compare, so timing doesn't tell
+          // which usernames exist.
+          const ok = await bcrypt.compare(String(ctx.password), row ? row.password_hash : DUMMY_HASH);
+          // The account may have been deleted during the compare; its folder
+          // was moved aside then and must not be recreated below.
+          if (ok && row && getUserById(row.id)) {
+            user = { id: row.id, username: row.username };
+            jail = jailFor(row.username);
+            fs.mkdirSync(jail, { recursive: true });
+            realJail = fs.realpathSync(jail);
+            audit({ userId: user.id, username: user.username, action: 'sftp.login', ip });
+            ctx.accept();
+          } else if (ok && row) {
+            refuse(ctx); // right password for a just-deleted account: not a guess
+          } else {
+            authLimiter.recordFailure(ip);
+            audit({ action: 'sftp.login.fail', detail: `username=${String(ctx.username).slice(0, 40)}`, ip });
+            refuse(ctx);
+          }
+        } finally {
+          release();
         }
-      }).catch(() => ctx.reject(['password']));
+      }).catch((err) => {
+        console.error('[sftp auth]', err && err.message);
+        refuse(ctx);
+      });
     });
 
     const log = (action, detail) => {
@@ -197,8 +280,17 @@ function startSftpServer() {
 
           // Every request handler runs guarded: a bad request from one client
           // must never throw out of the event loop and take the server down.
+          // It also cuts off an account that an admin deleted while this
+          // connection was open (web sessions go with the user row; this
+          // connection would otherwise keep working, and its jail folder has
+          // been moved aside, so nothing here may recreate it).
           const on = (event, fn) => sftp.on(event, (reqid, ...args) => {
             try {
+              if (!getUserById(user.id)) {
+                try { sftp.status(reqid, STATUS_CODE.PERMISSION_DENIED, 'This account no longer exists'); } catch { /* channel gone */ }
+                try { client.end(); } catch { /* already closed */ }
+                return;
+              }
               fn(reqid, ...args);
             } catch (err) {
               console.error(`[sftp] ${event} failed:`, err && err.message);
@@ -221,16 +313,29 @@ function startSftpServer() {
             sftp.status(reqid, code, err && err.sftpCode !== undefined ? err.message : undefined);
           };
 
-          const quotaLeft = () => {
-            const row = getUserById(user.id);
-            return row ? row.quota_bytes - row.used_bytes : 0;
+          // Every open upload holds a reservation in the shared quota ledger
+          // (util/quota) for what it adds on top of the file it replaces, so
+          // parallel handles and web uploads can't each spend the same free
+          // space. h.reserved is what this handle holds; give it back once.
+          const releaseReservation = (h) => {
+            if (h.reserved > 0) quota.release(user.id, h.reserved);
+            h.reserved = 0;
+          };
+
+          // Where a path really leads must stay inside the jail (see
+          // staysInside). `parentOnly` for calls that act on a link itself
+          // (LSTAT, REMOVE) instead of following it.
+          const resolveSafe = (given, parentOnly = false) => {
+            const r = resolveHere(given);
+            if (!staysInside(parentOnly && r.abs !== jail ? path.dirname(r.abs) : r.abs, realJail)) throw escaped();
+            return r;
           };
 
           on('REALPATH', (reqid, given) => {
             try {
               const { abs, virtual } = resolveHere(given);
-              let stat;
-              try { stat = fs.statSync(abs); } catch { stat = null; }
+              let stat = null;
+              try { if (staysInside(abs, realJail)) stat = fs.statSync(abs); } catch { /* no attrs */ }
               sftp.name(reqid, [{
                 filename: virtual,
                 longname: stat ? longname(virtual, stat, user.username) : virtual,
@@ -241,14 +346,14 @@ function startSftpServer() {
 
           on('STAT', (reqid, given) => {
             try {
-              const { abs } = resolveHere(given);
+              const { abs } = resolveSafe(given);
               fs.stat(abs, (err, stat) => (err ? fail(reqid, err) : sftp.attrs(reqid, toAttrs(stat))));
             } catch (err) { fail(reqid, err); }
           });
 
           on('LSTAT', (reqid, given) => {
             try {
-              const { abs } = resolveHere(given);
+              const { abs } = resolveSafe(given, true);
               fs.lstat(abs, (err, stat) => (err ? fail(reqid, err) : sftp.attrs(reqid, toAttrs(stat))));
             } catch (err) { fail(reqid, err); }
           });
@@ -261,12 +366,18 @@ function startSftpServer() {
 
           on('OPEN', (reqid, given, flags) => {
             try {
-              const { abs, virtual } = resolveHere(given);
+              const { abs, virtual } = resolveSafe(given);
               const writing = (flags & (OPEN_MODE.WRITE | OPEN_MODE.APPEND)) !== 0;
               if (!writing) {
-                fs.open(abs, 'r', (err, fd) => {
-                  if (err) return fail(reqid, err);
-                  sftp.handle(reqid, makeHandle({ type: 'file', fd, abs }));
+                // Open the resolved path, not the name: a link swapped in
+                // after the check above is then not followed.
+                fs.realpath(abs, (rpErr, real) => {
+                  if (rpErr) return fail(reqid, rpErr);
+                  if (real !== realJail && !real.startsWith(realJail + path.sep)) return fail(reqid, escaped());
+                  fs.open(real, 'r', (err, fd) => {
+                    if (err) return fail(reqid, err);
+                    sftp.handle(reqid, makeHandle({ type: 'file', fd, abs: real }));
+                  });
                 });
                 return;
               }
@@ -303,8 +414,9 @@ function startSftpServer() {
                 virtual,
                 name,
                 size: keep ? existing.size : 0,
-                replacedSize: existing ? existing.size : 0,
+                replacedSize: existing && !fs.lstatSync(abs).isSymbolicLink() ? existing.size : 0, // links free nothing
                 append: (flags & OPEN_MODE.APPEND) !== 0,
+                reserved: 0,
                 failed: null,
                 times: null,
               }));
@@ -337,9 +449,13 @@ function startSftpServer() {
               h.failed = `File is larger than the ${Math.round(config.MAX_UPLOAD_BYTES / 1024 / 1024)} MB limit`;
               return fail(reqid, failure(h.failed));
             }
-            if (newSize - h.replacedSize > quotaLeft()) {
-              h.failed = 'Upload exceeds your storage quota';
-              return fail(reqid, failure(h.failed));
+            const want = Math.max(0, newSize - h.replacedSize);
+            if (want > h.reserved) {
+              if (!quota.reserve(user.id, want - h.reserved)) {
+                h.failed = 'Upload exceeds your storage quota';
+                return fail(reqid, failure(h.failed));
+              }
+              h.reserved = want;
             }
             h.size = newSize;
             fs.write(h.fd, data, 0, data.length, at, (err) => {
@@ -359,13 +475,28 @@ function startSftpServer() {
               const size = fs.statSync(h.tmp).size;
               const check = validateUpload(h.tmp, h.name);
               if (!check.ok) throw failure(check.reason);
+              // A link to outside may have appeared at the target or above it
+              // since OPEN; moving into place must not write through it.
+              if (!staysInside(h.abs, realJail)) throw escaped();
               let replaced = 0;
               try {
-                const st = fs.statSync(h.abs);
-                if (!st.isFile()) throw failure('A folder with this name already exists');
-                replaced = st.size;
+                // A symlink at the target is replaced itself, and it was never
+                // counted in used_bytes, so it frees nothing.
+                if (!fs.lstatSync(h.abs).isSymbolicLink()) {
+                  const st = fs.statSync(h.abs);
+                  if (!st.isFile()) throw failure('A folder with this name already exists');
+                  replaced = st.size;
+                }
               } catch (err) { if (err.code !== 'ENOENT') throw err; }
-              if (size - replaced > quotaLeft()) throw failure('Upload exceeds your storage quota');
+              // Final check against the real state now: the replaced file may
+              // have changed since OPEN. This handle's own reservation is part
+              // of pending(), so it's taken out to not count it twice.
+              const row = getUserById(user.id);
+              if (!row) throw denied('This account no longer exists');
+              const others = quota.pending(user.id) - h.reserved;
+              if (row.used_bytes + others + size - replaced > row.quota_bytes && size > replaced) {
+                throw failure('Upload exceeds your storage quota');
+              }
               moveIntoPlace(h.tmp, h.abs);
               addUsedBytes(user.id, size - replaced);
               filesRows.removeExact.run(user.id, h.virtual); // one row per path, newest wins
@@ -395,17 +526,24 @@ function startSftpServer() {
               if (h.type !== 'upload') return sftp.status(reqid, STATUS_CODE.OK);
               if (closeErr) h.failed = h.failed || 'Could not store the file';
               const err = commitUpload(h);
+              releaseReservation(h); // landed (now in used_bytes) or refused
               return err ? fail(reqid, err) : sftp.status(reqid, STATUS_CODE.OK);
             });
           });
 
           on('OPENDIR', (reqid, given) => {
             try {
-              const { abs } = resolveHere(given);
-              fs.stat(abs, (err, stat) => {
-                if (err) return fail(reqid, err);
-                if (!stat.isDirectory()) return sftp.status(reqid, STATUS_CODE.FAILURE);
-                sftp.handle(reqid, makeHandle({ type: 'dir', path: abs, entries: null, pos: 0 }));
+              const { abs } = resolveSafe(given);
+              // The folder is read by its resolved path later, so one swapped
+              // for a link after this check is not followed.
+              fs.realpath(abs, (rpErr, real) => {
+                if (rpErr) return fail(reqid, rpErr);
+                if (real !== realJail && !real.startsWith(realJail + path.sep)) return fail(reqid, escaped());
+                fs.stat(real, (err, stat) => {
+                  if (err) return fail(reqid, err);
+                  if (!stat.isDirectory()) return sftp.status(reqid, STATUS_CODE.FAILURE);
+                  sftp.handle(reqid, makeHandle({ type: 'dir', path: abs, real, entries: null, pos: 0 }));
+                });
               });
             } catch (err) { fail(reqid, err); }
           });
@@ -426,7 +564,10 @@ function startSftpServer() {
                   if (hidden.includes(v)) continue; // locked folders are web-only
                 }
                 try {
-                  const stat = fs.statSync(path.join(h.path, e.name));
+                  const full = path.join(h.path, e.name);
+                  // A link is shown with its target's details only when the
+                  // target is inside the jail; otherwise as the bare link.
+                  const stat = e.isSymbolicLink() && !staysInside(full, realJail) ? fs.lstatSync(full) : fs.statSync(full);
                   names.push({ filename: e.name, longname: longname(e.name, stat, user.username), attrs: toAttrs(stat) });
                 } catch { /* entry vanished; skip */ }
               }
@@ -434,7 +575,7 @@ function startSftpServer() {
               sftp.name(reqid, names);
             };
             if (h.entries) return sendPage();
-            fs.readdir(h.path, { withFileTypes: true }, (err, entries) => {
+            fs.readdir(h.real, { withFileTypes: true }, (err, entries) => {
               if (err) return fail(reqid, err);
               h.entries = entries;
               h.pos = 0;
@@ -444,7 +585,7 @@ function startSftpServer() {
 
           on('MKDIR', (reqid, given) => {
             try {
-              const { abs, virtual } = resolveHere(given);
+              const { abs, virtual } = resolveSafe(given);
               if (abs === jail) throw failure('Already exists');
               checkNewName(abs, jail);
               fs.mkdir(abs, (err) => {
@@ -456,7 +597,7 @@ function startSftpServer() {
 
           on('RMDIR', (reqid, given) => {
             try {
-              const { abs, virtual } = resolveHere(given);
+              const { abs, virtual } = resolveSafe(given, true);
               if (abs === jail) throw denied('Cannot delete the root folder');
               fs.rmdir(abs, (err) => {
                 if (!err) {
@@ -470,14 +611,14 @@ function startSftpServer() {
 
           on('REMOVE', (reqid, given) => {
             try {
-              const { abs, virtual } = resolveHere(given);
+              const { abs, virtual } = resolveSafe(given, true);
               if (recentlyRefused(virtual)) {
                 throw failure('Not deleted: the last upload of this file was refused, so the stored copy is kept');
               }
               const st = fs.lstatSync(abs);
               if (st.isDirectory()) throw failure('Is a folder');
-              fs.unlinkSync(abs);
-              addUsedBytes(user.id, -st.size);
+              fs.unlinkSync(abs); // a symlink is removed itself, never its target
+              if (!st.isSymbolicLink()) addUsedBytes(user.id, -st.size); // links were never counted
               filesRows.removeExact.run(user.id, virtual);
               log('sftp.delete', `${virtual} (${st.size} bytes)`);
               sftp.status(reqid, STATUS_CODE.OK);
@@ -486,8 +627,8 @@ function startSftpServer() {
 
           on('RENAME', (reqid, fromGiven, toGiven) => {
             try {
-              const from = resolveHere(fromGiven);
-              const to = resolveHere(toGiven);
+              const from = resolveSafe(fromGiven);
+              const to = resolveSafe(toGiven);
               if (from.abs === jail || to.abs === jail) throw denied('Cannot rename the root folder');
               if (locks.inside(locks.locksOf(user.id), from.virtual).length) {
                 throw denied('This folder holds a locked folder, so it can\'t be renamed over SFTP');
@@ -499,6 +640,7 @@ function startSftpServer() {
               // Folders are never replaced.
               let replaced = null;
               try { replaced = fs.statSync(to.abs); } catch (err) { if (err.code !== 'ENOENT') throw err; }
+              const replacedIsLink = !!replaced && fs.lstatSync(to.abs).isSymbolicLink();
               if (replaced && replaced.ino === st.ino && replaced.dev === st.dev) replaced = null; // same file (case-only rename)
               if (replaced && (!replaced.isFile() || !st.isFile())) throw failure('A file or folder with the new name already exists');
               // A rename can change what a file claims to be (x.png.partial ->
@@ -516,7 +658,7 @@ function startSftpServer() {
                 filesRows.renameUnder.run(to.virtual + '/', sqlLen(prefix) + 1, user.id, sqlLen(prefix), prefix);
               } else {
                 if (replaced) {
-                  addUsedBytes(user.id, -replaced.size);
+                  if (!replacedIsLink) addUsedBytes(user.id, -replaced.size); // links were never counted
                   filesRows.removeExact.run(user.id, to.virtual);
                 }
                 filesRows.renameExact.run(to.virtual, user.id, from.virtual);
@@ -530,7 +672,7 @@ function startSftpServer() {
           // times; other attributes are accepted and ignored.
           on('SETSTAT', (reqid, given, attrs) => {
             try {
-              const { abs } = resolveHere(given);
+              const { abs } = resolveSafe(given);
               const t = timesFrom(attrs);
               if (!t) { fs.statSync(abs); return sftp.status(reqid, STATUS_CODE.OK); }
               fs.utimes(abs, t.atime, t.mtime, (err) => fail(reqid, err));
@@ -552,7 +694,10 @@ function startSftpServer() {
             for (const h of handles.values()) {
               if (h.type === 'dir') continue;
               try { fs.closeSync(h.fd); } catch { /* already closed */ }
-              if (h.type === 'upload') fs.rmSync(h.tmp, { force: true });
+              if (h.type === 'upload') {
+                fs.rmSync(h.tmp, { force: true });
+                releaseReservation(h);
+              }
             }
             handles.clear();
           };
@@ -574,4 +719,4 @@ function startSftpServer() {
   return server;
 }
 
-module.exports = { startSftpServer, resolveVirtual };
+module.exports = { startSftpServer, resolveVirtual, authLimiter };

@@ -54,6 +54,10 @@ const config = {
 
   GIT_ALLOW_ANY_HTTPS_HOST: bool(process.env.GIT_ALLOW_ANY_HTTPS_HOST, false),
   GIT_TIMEOUT_MS: int(process.env.GIT_TIMEOUT_SECONDS, 300) * 1000,
+  // Repos count toward no user's quota, so they get their own caps: one repo,
+  // and all of REPOS_ROOT together.
+  REPO_MAX_BYTES: int(process.env.REPO_MAX_BYTES, 1024 * 1024 * 1024),
+  REPOS_MAX_TOTAL_BYTES: int(process.env.REPOS_MAX_TOTAL_BYTES, 10 * 1024 * 1024 * 1024),
 
   TRUST_PROXY: bool(process.env.TRUST_PROXY, false),
   IS_PROD: process.env.NODE_ENV === 'production',

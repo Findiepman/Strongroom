@@ -62,7 +62,8 @@ logs, then change it under **Settings**. Files, accounts and keys live in the
 - Folder passwords: lock any folder with a second password on top of the sign-in.
 - GitHub puller: paste a public repository URL and the server clones it, or
   fast-forwards it on the next pull, with a live log. Handy for keeping copies
-  of repositories on your own storage.
+  of repositories on your own storage. A repo with an `index.html` can be
+  opened as a sandboxed live preview.
 
 **Not supported (yet):** public share links, two-factor sign-in or SSO, WebDAV,
 mobile apps, and encryption at rest.
@@ -133,6 +134,8 @@ All settings are environment variables, read from `.env` or from the
 | `SFTP_PUBLIC_HOST` | request host | Hostname shown on the SFTP page |
 | `GIT_ALLOW_ANY_HTTPS_HOST` | `false` | `true` allows any https git host, not just github.com |
 | `GIT_TIMEOUT_SECONDS` | `300` | Kill a clone or pull after this long |
+| `REPO_MAX_BYTES` | `1073741824` | Largest single repo (1 GiB). A clone or pull that grows past it is stopped |
+| `REPOS_MAX_TOTAL_BYTES` | `10737418240` | All pulled repos together (10 GiB). No new clone or pull starts past it |
 | `TRUST_PROXY` | `false` | Set `true` behind nginx, Caddy or Cloudflare Tunnel so rate limits see real IPs |
 
 ## HTTPS and remote access
@@ -200,6 +203,14 @@ How Strongroom protects accounts and files:
 - The GitHub puller runs `git` with an argument list (no shell), accepts only
   `https://github.com/owner/repo` URLs, keeps clones inside `REPOS_ROOT`, and
   never forwards raw git output to the browser (it goes to `DATA_DIR/logs/git.log`).
+  Repos are cloned with `core.symlinks=false`, and every file access (web,
+  ZIP, live preview) checks the real path, so a symlink can't lead outside
+  `REPOS_ROOT` or a user's folder. Size caps (`REPO_MAX_BYTES`,
+  `REPOS_MAX_TOTAL_BYTES`) stop a repo from filling the disk.
+- Live previews (`/live/<repo>/`) run in a CSP sandbox with their own opaque
+  origin, so repo code can't call the API or read the viewer's session. The
+  page's own files load through a per-repo token in the URL that dies with the
+  sign-in. Inside a preview, localStorage, cookies and IndexedDB don't work.
 
 What it does not protect against: files are **not encrypted at rest**, so anyone
 with access to the disk or NAS share can read them (use full-disk encryption if

@@ -41,6 +41,12 @@ router.post('/users', async (req, res, next) => {
       : config.DEFAULT_QUOTA_BYTES;
     const exists = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
     if (exists) return res.status(409).json({ error: 'That username is taken' });
+    // Storage folders are named after the username. A folder left behind by an
+    // account deleted before deletes moved it aside would hand its files to
+    // whoever gets the name next, so that is refused until it is cleared.
+    if (folderHasFiles(path.join(config.STORAGE_ROOT, username))) {
+      return res.status(409).json({ error: `The storage folder "${username}" still holds files from an earlier account. Move or remove it on the server first.` });
+    }
 
     const hash = await bcrypt.hash(password, config.BCRYPT_COST);
     const info = db.prepare(
@@ -76,15 +82,36 @@ router.patch('/users/:id', (req, res) => {
 });
 
 // DELETE /api/admin/users/:id — removes the account and its sessions.
-// Files stay on disk so a mistaken delete loses no data; clean up manually.
-router.delete('/users/:id', (req, res) => {
+// Files stay on disk so a mistaken delete loses no data, but they are moved
+// aside to STORAGE_ROOT/.deleted-<name>-<time>: left under the plain username
+// they would belong to the next account created with that name. Usernames
+// start with a letter, so the dot-name can never be a user's folder.
+router.delete('/users/:id', (req, res, next) => {
   const target = getUserById(Number(req.params.id));
   if (!target) return res.status(404).json({ error: 'No such user' });
   if (target.id === req.user.id) return res.status(400).json({ error: 'You cannot delete your own account' });
+  const folder = path.join(config.STORAGE_ROOT, target.username);
+  const keptAs = `.deleted-${target.username}-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+  let moved = false;
+  try {
+    fs.renameSync(folder, path.join(config.STORAGE_ROOT, keptAs));
+    moved = true;
+  } catch (err) {
+    if (err.code !== 'ENOENT') return next(err); // account stays: nothing changed yet
+  }
   db.prepare('DELETE FROM users WHERE id = ?').run(target.id);
-  audit({ userId: req.user.id, username: req.user.username, action: 'user.delete', detail: `${target.username} (files kept on disk)`, ip: req.ip });
-  res.json({ ok: true, note: 'Account removed. Files remain on disk under the storage root.' });
+  const where = moved ? `files kept in ${keptAs}` : 'had no files';
+  audit({ userId: req.user.id, username: req.user.username, action: 'user.delete', detail: `${target.username} (${where})`, ip: req.ip });
+  res.json({ ok: true, note: moved ? `Account removed. Its files were kept on the server in ${keptAs}.` : 'Account removed.' });
 });
+
+function folderHasFiles(dir) {
+  try {
+    return fs.readdirSync(dir).length > 0;
+  } catch {
+    return false;
+  }
+}
 
 // POST /api/admin/users/:id/logout — force-logout everywhere
 router.post('/users/:id/logout', (req, res) => {

@@ -6,13 +6,14 @@ const express = require('express');
 const Busboy = require('busboy');
 const archiver = require('archiver');
 const config = require('../config');
-const { db, audit, addUsedBytes } = require('../db');
+const { db, audit, addUsedBytes, getUserById } = require('../db');
 const { requireAuth, csrfProtect } = require('../middleware/auth');
-const { safeResolve, validateName, relDisplay, PathError } = require('../util/paths');
+const { safeResolve, assertRealInside, validateName, relDisplay, PathError } = require('../util/paths');
 const { validateUpload, previewType, guessMime } = require('../util/filetype');
 const { assertNotReserved, moveIntoPlace } = require('../util/storage');
 const locks = require('../util/locks');
 const usage = require('../util/usage');
+const quota = require('../util/quota');
 
 const router = express.Router();
 router.use(requireAuth, csrfProtect);
@@ -25,18 +26,24 @@ function userRoot(req) {
 
 // Client paths live in one virtual tree: the user's own storage, plus a
 // read-only "/repos" mount that maps onto REPOS_ROOT (the GitHub puller's
-// sandbox). Everything resolves through safeResolve against its real root.
+// sandbox). Everything resolves through safeResolve against its real root,
+// then through assertRealInside so a symlink can't lead out of it (pulled
+// repos can check them out; on the NAS share they can appear from outside the
+// app). { followLeaf: false } is for delete and rename, which act on the entry
+// itself: removing or renaming a link never touches what it points at, and a
+// stray link must stay removable.
 // A path inside a locked folder is refused (423) unless this session opened
 // it; { lockCheck: false } is only for the lock routes, which check themselves.
-function resolveTarget(req, relPath, { lockCheck = true } = {}) {
+function resolveTarget(req, relPath, { lockCheck = true, followLeaf = true } = {}) {
   const raw = String(relPath == null ? '' : relPath).replace(/\\/g, '/');
   const m = raw.match(/^\/?repos(?:\/(.*))?$/);
   if (m) {
-    const abs = safeResolve(config.REPOS_ROOT, m[1] || '');
+    // Repos are read-only, so every access follows the leaf.
+    const abs = assertRealInside(config.REPOS_ROOT, safeResolve(config.REPOS_ROOT, m[1] || ''));
     return { abs, root: config.REPOS_ROOT, readOnly: true, prefix: '/repos', rel: null };
   }
   const root = userRoot(req);
-  const abs = safeResolve(root, raw);
+  const abs = assertRealInside(root, safeResolve(root, raw), { followLeaf });
   const rel = relDisplay(root, abs);
   if (lockCheck) locks.assertAccess(req, rel);
   return { abs, root, readOnly: false, prefix: '', rel };
@@ -178,8 +185,14 @@ router.post('/upload', (req, res, next) => {
 
   const results = [];
   const pending = [];
-  const quota = req.user.quota_bytes;
-  let usedNow = req.user.used_bytes;
+  const userId = req.user.id;
+  // busboy emits 'error' and then 'close' when it fails; answer only once.
+  let answered = false;
+  const answer = (status, payload) => {
+    if (answered || res.headersSent) return;
+    answered = true;
+    res.status(status).json(payload);
+  };
 
   busboy.on('file', (field, stream, info) => {
     let name;
@@ -188,70 +201,97 @@ router.post('/upload', (req, res, next) => {
       assertNotReserved(destDir, root, name);
     } catch (err) {
       results.push({ name: String(info.filename || '').slice(0, 100), ok: false, error: err.message });
+      stream.on('error', () => { /* aborted mid-skip: nothing to clean up */ });
       stream.resume();
       return;
     }
 
+    const dest = path.join(destDir, name);
     const tmpPath = path.join(config.TMP_DIR, crypto.randomBytes(16).toString('hex') + '.part');
     const out = fs.createWriteStream(tmpPath, { flags: 'wx' });
+    // lstat: a symlink in the way is replaced, never followed, and links
+    // aren't counted in used_bytes, so replacing one frees nothing.
+    const lstatOrNull = (p) => { try { return fs.lstatSync(p); } catch { return null; } };
+    const prev = overwrite ? lstatOrNull(dest) : null;
+    const credit = prev && prev.isFile() ? prev.size : 0;
     let written = 0;
+    let reserved = 0; // bytes held in the shared quota ledger for this file
     let failed = null;
+    const fail = (msg) => {
+      if (failed) return;
+      failed = msg;
+      stream.unpipe(out);
+      out.destroy();
+      stream.resume();
+    };
+    const discard = () => {
+      try { fs.rmSync(tmpPath, { force: true }); } catch { /* best effort */ }
+    };
 
     stream.on('data', (chunk) => {
       written += chunk.length;
-      if (usedNow + written > quota && !failed) {
-        failed = 'Upload exceeds your storage quota';
-        stream.unpipe(out);
-        out.destroy();
-        stream.resume();
-      }
+      if (failed) return;
+      // Reserve as the bytes arrive, against used_bytes plus every other
+      // unfinished upload (other tabs, SFTP), so parallel uploads can't
+      // together pass the quota.
+      if (!quota.reserve(userId, chunk.length, credit)) return fail('Upload exceeds your storage quota');
+      reserved += chunk.length;
     });
     stream.on('limit', () => {
       if (!failed) failed = `File is larger than the ${Math.round(config.MAX_UPLOAD_BYTES / 1024 / 1024)} MB limit`;
     });
+    // The client went away or the form broke off mid-file: busboy destroys
+    // this stream with an error ('close' follows and cleans up).
+    stream.on('error', () => fail('The upload was interrupted'));
+    out.on('error', () => fail('Could not store the file'));
     stream.pipe(out);
 
     const done = new Promise((resolve) => {
+      let finished = false;
       stream.on('close', () => {
-        out.end();
-        out.on('close', finish);
-        out.on('error', finish);
-        if (out.destroyed) finish();
+        if (!out.destroyed) out.end();
+        // Wait for the temp file to be closed before removing or moving it.
+        if (out.closed) finish();
+        else out.once('close', finish);
 
         function finish() {
+          if (finished) return;
+          finished = true;
           try {
             if (failed) {
-              fs.rmSync(tmpPath, { force: true });
+              discard();
               results.push({ name, ok: false, error: failed });
-              return resolve();
+              return;
             }
             const check = validateUpload(tmpPath, name);
             if (!check.ok) {
-              fs.rmSync(tmpPath, { force: true });
+              discard();
               audit({ userId: req.user.id, username: req.user.username, action: 'upload.blocked', detail: `${name}: ${check.reason}`, ip: req.ip });
               results.push({ name, ok: false, error: check.reason });
-              return resolve();
+              return;
             }
-            const dest = path.join(destDir, name);
-            if (!overwrite && fs.existsSync(dest)) {
-              fs.rmSync(tmpPath, { force: true });
+            const existing = lstatOrNull(dest);
+            if (!overwrite && existing) {
+              discard();
               results.push({ name, ok: false, error: 'A file with this name already exists' });
-              return resolve();
+              return;
             }
-            const replacedSize = overwrite && fs.existsSync(dest) ? fs.statSync(dest).size : 0;
+            const replacedSize = existing && existing.isFile() ? existing.size : 0;
             moveIntoPlace(tmpPath, dest);
-            usedNow += written - replacedSize;
             addUsedBytes(req.user.id, written - replacedSize);
             const rel = relDisplay(root, dest);
             db.prepare('INSERT INTO files (user_id, relpath, size, mime, created_at) VALUES (?, ?, ?, ?, ?)')
               .run(req.user.id, rel, written, check.mime, Date.now());
             audit({ userId: req.user.id, username: req.user.username, action: 'upload', detail: `${rel} (${written} bytes)`, ip: req.ip });
             results.push({ name, ok: true, size: written, mime: check.mime });
-            resolve();
           } catch (err) {
-            fs.rmSync(tmpPath, { force: true });
+            discard();
             results.push({ name, ok: false, error: 'Could not store the file' });
             console.error('[upload]', err);
+          } finally {
+            // After addUsedBytes on success, so the bytes are never uncounted.
+            quota.release(userId, reserved);
+            reserved = 0;
             resolve();
           }
         }
@@ -262,10 +302,17 @@ router.post('/upload', (req, res, next) => {
 
   busboy.on('close', async () => {
     await Promise.all(pending);
-    if (results.some((r) => r.ok)) usage.markDirty(req.user.id);
-    res.json({ results, usedBytes: usedNow, quotaBytes: quota });
+    if (results.some((r) => r.ok)) usage.markDirty(userId);
+    const fresh = getUserById(userId) || req.user;
+    answer(200, { results, usedBytes: fresh.used_bytes, quotaBytes: fresh.quota_bytes });
   });
-  busboy.on('error', () => res.status(400).json({ error: 'Upload stream failed. Try again.' }));
+  busboy.on('error', () => answer(400, { error: 'Upload stream failed. Try again.' }));
+  // A client that disconnects mid-upload never finishes the form, so busboy
+  // would wait forever with the file half written and its quota reserved.
+  // Destroying it ends the open file stream, which runs the cleanup above.
+  res.on('close', () => {
+    if (!res.writableFinished) busboy.destroy(new Error('Client went away'));
+  });
   req.pipe(busboy);
 });
 
@@ -309,15 +356,16 @@ router.get('/download-zip', (req, res) => {
   // res 'close' fires on normal finish too; only abort if the client bailed.
   res.on('close', () => { if (!res.writableFinished) archive.abort(); });
   archive.pipe(res);
-  // Repo zips leave out .git internals, matching what the listing shows.
-  const gitGlobs = ['.git', '.git/**', '**/.git', '**/.git/**'];
-  archive.glob('**/*', {
-    cwd: t.abs,
-    dot: true,
-    follow: false,
-    ignore: t.readOnly ? gitGlobs : [],
-    skip: t.readOnly ? gitGlobs : [],
-  }, { prefix: name });
+  // The walk lstat()s and never descends into a linked folder, but archiver
+  // would still store each symlink as a zip link entry: that leaks where it
+  // points (e.g. /home/...) and recreates the link wherever the zip is
+  // unpacked. Symlinks are left out, like the listing leaves them out.
+  // Repo zips also leave out .git internals, matching what the listing shows.
+  archive.directory(t.abs, name, (entry) => {
+    if (entry.stats && entry.stats.isSymbolicLink()) return false;
+    if (t.readOnly && entry.name.split('/').includes('.git')) return false;
+    return entry;
+  });
   archive.finalize();
 });
 
@@ -358,10 +406,12 @@ router.post('/mkdir', (req, res) => {
 // POST /api/files/rename {path, newName}
 router.post('/rename', (req, res) => {
   const { path: rel, newName } = req.body || {};
-  const t = resolveTarget(req, rel);
+  const t = resolveTarget(req, rel, { followLeaf: false });
   if (t.readOnly) return readOnlyError(res);
   if (t.abs === path.resolve(t.root)) return res.status(400).json({ error: 'Cannot rename the root folder' });
-  if (!fs.existsSync(t.abs)) return res.status(404).json({ error: 'File not found' });
+  let exists = true;
+  try { fs.lstatSync(t.abs); } catch { exists = false; } // lstat: a dangling link is still renamable
+  if (!exists) return res.status(404).json({ error: 'File not found' });
   locks.assertRenamable(req, t.rel);
   const cleanName = validateName(newName);
   assertNotReserved(path.dirname(t.abs), t.root, cleanName);
@@ -382,14 +432,15 @@ router.post('/delete', async (req, res) => {
   let freed = 0;
   for (const rel of paths) {
     try {
-      const t = resolveTarget(req, rel);
+      const t = resolveTarget(req, rel, { followLeaf: false });
       if (t.readOnly) throw new PathError('Repos are read-only here');
       if (t.abs === path.resolve(t.root)) throw new PathError('Cannot delete the root folder');
       locks.assertInsideOpen(req, t.rel);
       const stat = fs.lstatSync(t.abs);
       // A big folder takes a while to count and remove; both run without
-      // blocking the server.
-      const size = stat.isDirectory() ? await usage.sizeOf(t.abs) : stat.size;
+      // blocking the server. rm removes a symlink itself (never its target),
+      // and links aren't counted in used_bytes, so removing one frees nothing.
+      const size = stat.isDirectory() ? await usage.sizeOf(t.abs) : stat.isFile() ? stat.size : 0;
       await fs.promises.rm(t.abs, { recursive: true, force: false });
       freed += size;
       audit({ userId: req.user.id, username: req.user.username, action: 'delete', detail: `${relDisplay(t.root, t.abs)} (${size} bytes)`, ip: req.ip });

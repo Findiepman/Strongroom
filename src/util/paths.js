@@ -23,6 +23,47 @@ function safeResolve(root, relPath) {
   return resolved;
 }
 
+// safeResolve is lexical only: a symlink inside the root (one checked out by a
+// pulled repo, or one made on the NAS share from outside the app) still leads
+// out of it. This resolves the real path, following every link, and is true
+// only when it lands inside the real root. A path that doesn't exist yet is
+// judged by its nearest existing ancestor (mkdir, upload targets). A dangling
+// link is refused: writing through it would land wherever it points.
+function isRealInside(root, abs) {
+  let realRoot;
+  try { realRoot = fs.realpathSync.native(root); } catch { return false; }
+  const prefix = realRoot.endsWith(path.sep) ? realRoot : realRoot + path.sep;
+  let p = path.resolve(abs);
+  for (;;) {
+    let real;
+    try {
+      real = fs.realpathSync.native(p);
+    } catch (err) {
+      if (err.code !== 'ENOENT' && err.code !== 'ENOTDIR') return false;
+      try { fs.lstatSync(p); return false; } catch { /* really not there: check the parent */ }
+      const parent = path.dirname(p);
+      if (parent === p) return false;
+      p = parent;
+      continue;
+    }
+    return real === realRoot || real.startsWith(prefix);
+  }
+}
+
+// Throwing form of isRealInside, for the request paths. `followLeaf: false`
+// checks only the folder the entry sits in, for operations on the entry itself
+// (delete, rename): those act on a symlink, never on what it points at.
+function assertRealInside(root, abs, { followLeaf = true } = {}) {
+  const resolved = path.resolve(abs);
+  const check = followLeaf || resolved === path.resolve(root) ? resolved : path.dirname(resolved);
+  if (!isRealInside(root, check)) {
+    const err = new PathError('This path is a link that leads outside its folder');
+    err.status = 403;
+    throw err;
+  }
+  return abs;
+}
+
 // A single path segment (file or folder name): no separators, no traversal,
 // no control characters, sane length.
 function validateName(name) {
@@ -65,4 +106,4 @@ function dirSize(dir) {
   return total;
 }
 
-module.exports = { safeResolve, validateName, relDisplay, dirSize, PathError };
+module.exports = { safeResolve, isRealInside, assertRealInside, validateName, relDisplay, dirSize, PathError };

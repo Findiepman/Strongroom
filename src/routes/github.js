@@ -7,6 +7,7 @@ const express = require('express');
 const config = require('../config');
 const { audit } = require('../db');
 const { requireAuth, csrfProtect } = require('../middleware/auth');
+const { sizeOf } = require('../util/usage');
 
 const router = express.Router();
 router.use(requireAuth, csrfProtect);
@@ -46,6 +47,52 @@ function friendlyError(exitCode, rawOutput) {
   return 'git exited with an error. Details are in the server log.';
 }
 
+const GiB = 1024 * 1024 * 1024;
+function formatBytes(n) {
+  if (n >= GiB) return `${+(n / GiB).toFixed(1)} GB`;
+  if (n >= 1024 * 1024) return `${Math.round(n / 1024 / 1024)} MB`;
+  return `${Math.round(n / 1024)} KB`;
+}
+
+// Why a new clone/pull may not start, or null. Every running job may still
+// grow to the per-repo limit, so they count at that worst case: otherwise many
+// clones started at once would each see the same free space.
+function repoCapError({ totalBytes, runningJobs, maxRepoBytes, maxTotalBytes }) {
+  if (totalBytes >= maxTotalBytes) {
+    return `Repository storage is full (${formatBytes(totalBytes)} of ${formatBytes(maxTotalBytes)}). Remove a repository first.`;
+  }
+  if (runningJobs > 0 && totalBytes + runningJobs * maxRepoBytes >= maxTotalBytes) {
+    return 'Repository storage is nearly full. Wait for the running pulls to finish and try again.';
+  }
+  return null;
+}
+
+// Checks the size of `dir` every intervalMs while git runs and calls
+// onOver(bytes) once when it passes maxBytes. The walk is async and the next
+// check is only scheduled after the last one finished, so a big tree never
+// blocks the server or piles up walks. Returns a stop function.
+function watchSize(dir, maxBytes, onOver, intervalMs = 2000) {
+  let stopped = false;
+  let timer = null;
+  const tick = async () => {
+    const bytes = await sizeOf(dir);
+    if (stopped) return;
+    if (bytes > maxBytes) {
+      stopped = true;
+      onOver(bytes);
+      return;
+    }
+    timer = setTimeout(tick, intervalMs);
+    timer.unref();
+  };
+  timer = setTimeout(tick, intervalMs);
+  timer.unref();
+  return () => {
+    stopped = true;
+    clearTimeout(timer);
+  };
+}
+
 function pushLine(job, text) {
   const entry = { t: Date.now(), text };
   job.lines.push(entry);
@@ -58,9 +105,13 @@ function startJob({ url, repoName, op, dest, user, ip }) {
   const job = { id, repo: repoName, op, status: 'running', lines: [], listeners: new Set(), startedAt: Date.now() };
   jobs.set(id, job);
 
+  // core.symlinks=false: git writes a repo's symlinks as small plain files
+  // holding the target path instead of real links, so a repo can't link to
+  // files elsewhere on the server. --config stores it in the clone's own
+  // config for later pulls; -c covers repos cloned before this was set.
   const args = op === 'clone'
-    ? ['clone', '--progress', '--', url, dest]
-    : ['-C', dest, 'pull', '--ff-only', '--progress'];
+    ? ['-c', 'core.symlinks=false', 'clone', '--config', 'core.symlinks=false', '--progress', '--', url, dest]
+    : ['-C', dest, '-c', 'core.symlinks=false', 'pull', '--ff-only', '--progress'];
 
   const child = spawn('git', args, {
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'echo', GCM_INTERACTIVE: 'never' },
@@ -73,6 +124,16 @@ function startJob({ url, repoName, op, dest, user, ip }) {
     pushLine(job, 'Timed out, stopping git');
     child.kill('SIGKILL');
   }, config.GIT_TIMEOUT_MS);
+
+  let oversize = 0; // bytes on disk when the size limit was hit
+  const stopWatch = watchSize(dest, config.REPO_MAX_BYTES, (bytes) => {
+    oversize = bytes;
+    pushLine(job, `Repository passed the ${formatBytes(config.REPO_MAX_BYTES)} size limit, stopping git`);
+    child.kill('SIGKILL');
+  });
+  const tooBigLine = () => (op === 'clone'
+    ? `This repository is bigger than the ${formatBytes(config.REPO_MAX_BYTES)} limit. The partial copy was removed.`
+    : `This repository is now bigger than the ${formatBytes(config.REPO_MAX_BYTES)} limit. Ask an admin to remove it.`);
 
   let lastPct = {};
   const onData = (buf) => {
@@ -96,24 +157,47 @@ function startJob({ url, repoName, op, dest, user, ip }) {
 
   child.on('error', () => {
     clearTimeout(timer);
+    stopWatch();
     job.status = 'failed';
     pushLine(job, 'git is not installed on the server');
     finish();
   });
 
-  child.on('close', (code) => {
+  // This runs in an async handler: a throw here would be an unhandled
+  // rejection, so a folder that can't be removed is only logged.
+  const removePartial = () => {
+    try {
+      fs.rmSync(dest, { recursive: true, force: true, maxRetries: 3 });
+    } catch (err) {
+      console.error('[github] could not remove partial clone', dest, err.message);
+    }
+  };
+
+  child.on('close', async (code) => {
     clearTimeout(timer);
+    stopWatch();
+    // A small repo can finish between two checks: measure once more at the end.
+    if (!oversize && code === 0) {
+      const bytes = await sizeOf(dest);
+      if (bytes > config.REPO_MAX_BYTES) oversize = bytes;
+    }
     try {
       fs.appendFileSync(gitLogPath, `\n--- ${new Date().toISOString()} ${op} ${repoName} by ${user.username} (exit ${code}) ---\n${rawOutput}\n`);
     } catch { /* log write is best-effort */ }
     if (job.status === 'running') {
-      if (code === 0) {
+      if (oversize) {
+        job.status = 'failed';
+        pushLine(job, tooBigLine());
+        if (op === 'clone') removePartial();
+        // git was killed mid-pull: drop its lock so the next pull can run.
+        else fs.rm(path.join(dest, '.git', 'index.lock'), { force: true }, () => {});
+      } else if (code === 0) {
         job.status = 'done';
         pushLine(job, op === 'clone' ? 'Clone complete' : 'Pull complete');
       } else {
         job.status = 'failed';
         pushLine(job, friendlyError(code, rawOutput));
-        if (op === 'clone') fs.rmSync(dest, { recursive: true, force: true });
+        if (op === 'clone') removePartial();
       }
     }
     audit({ userId: user.id, username: user.username, action: 'repo.pull', detail: `${op} ${repoName}: ${job.status}`, ip });
@@ -130,7 +214,7 @@ function startJob({ url, repoName, op, dest, user, ip }) {
 }
 
 // POST /api/github/repos {url}
-router.post('/repos', (req, res) => {
+router.post('/repos', async (req, res, next) => {
   const { url } = req.body || {};
   if (typeof url !== 'string' || url.length > 300) {
     return res.status(400).json({ error: 'Paste a repository URL' });
@@ -149,6 +233,31 @@ router.post('/repos', (req, res) => {
     return res.status(400).json({ error: 'Repository name is not allowed' });
   }
 
+  // Repos don't count toward anyone's quota, so they get their own caps.
+  let totalBytes;
+  try {
+    totalBytes = await sizeOf(config.REPOS_ROOT);
+  } catch (err) {
+    return next(err);
+  }
+  const capError = repoCapError({
+    totalBytes,
+    runningJobs: [...jobs.values()].filter((j) => j.status === 'running').length,
+    maxRepoBytes: config.REPO_MAX_BYTES,
+    maxTotalBytes: config.REPOS_MAX_TOTAL_BYTES,
+  });
+  if (capError) return res.status(507).json({ error: capError });
+
+  // Express 4 doesn't catch a throw after an await: pass it on by hand.
+  try {
+    startAfterChecks(req, res, { url, repoName, dest });
+  } catch (err) {
+    next(err);
+  }
+});
+
+function startAfterChecks(req, res, { url, repoName, dest }) {
+  // Checked after the await above, so two quick requests can't both start.
   const running = [...jobs.values()].find((j) => j.repo === repoName && j.status === 'running');
   if (running) return res.status(409).json({ error: 'A pull for this repository is already running', jobId: running.id });
 
@@ -158,7 +267,7 @@ router.post('/repos', (req, res) => {
   }
   const job = startJob({ url: url.trim(), repoName, op, dest, user: req.user, ip: req.ip });
   res.status(202).json({ jobId: job.id, repo: repoName, op });
-});
+}
 
 // GET /api/github/repos — list what's on disk plus running jobs
 router.get('/repos', (req, res) => {
@@ -211,3 +320,7 @@ router.get('/jobs/:id/events', (req, res) => {
 });
 
 module.exports = router;
+// For tests.
+module.exports.repoCapError = repoCapError;
+module.exports.watchSize = watchSize;
+module.exports.startJob = startJob;
